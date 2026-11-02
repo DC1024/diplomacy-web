@@ -58,7 +58,8 @@ class Settings:
     base_url: str = ""
     api_key: str = ""
     model: str = ""
-    timeout: float = 60.0
+    timeout: float = 120.0
+    max_tokens: int = OpenAICompatProvider.DEFAULT_MAX_TOKENS  # 含思维链的总配额
     price_in: float = 2.0         # ¥ / 百万 input token
     price_out: float = 8.0        # ¥ / 百万 output token
     budget_cny: float = 20.0      # 单座位预算，超出后自动转保底驻守
@@ -84,7 +85,8 @@ class Settings:
         if not self.configured:
             return None
         return OpenAICompatProvider(self.base_url, self.api_key, self.model,
-                                    timeout if timeout is not None else self.timeout)
+                                    timeout if timeout is not None else self.timeout,
+                                    max_tokens=self.max_tokens)
 
     def public(self) -> dict:
         """给页面的形态：**不含原始 key**，只给「有没有」和尾四位。"""
@@ -111,7 +113,8 @@ class Settings:
             base_url=base,
             api_key=key,
             model=model,
-            timeout=_env_float("LLM_TIMEOUT", 60.0),
+            timeout=_env_float("LLM_TIMEOUT", 120.0),
+            max_tokens=_env_int("LLM_MAX_TOKENS", OpenAICompatProvider.DEFAULT_MAX_TOKENS),
             price_in=_env_float("LLM_PRICE_IN", 2.0),
             price_out=_env_float("LLM_PRICE_OUT", 8.0),
             budget_cny=_env_float("LLM_BUDGET_CNY", 20.0),

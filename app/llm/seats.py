@@ -16,7 +16,7 @@ from ..persist import save
 from . import context as ctxmod
 from . import prompt as promptmod
 from .orders import hold_orders
-from .provider import Provider, ProviderError, Reply
+from .provider import BadOutput, Provider, ProviderError, Reply
 
 log = logging.getLogger("diplomacy.llm")
 
@@ -132,20 +132,61 @@ class LLMSeat:
 
     # ---------- 内部 ----------
     def _ask(self, system: str, user: str) -> tuple[dict, Reply]:
-        reply = self.provider.chat(system, user)
-        self._bill(reply)
+        reply = self._chat(system, user)
         action = parse_action(reply.text)
         if action is None:
             # 给一次纠正机会：把输出格式再强调一遍，比直接放弃更有价值
             self.usage.retries += 1
             retry_user = user + "\n\n上次输出无法解析为 JSON。请只输出一个 JSON 对象。"
-            reply2 = self.provider.chat(system, retry_user)
-            self._bill(reply2)
+            reply2 = self._chat(system, retry_user)
             action = parse_action(reply2.text)
             if action is None:
                 raise ProviderError("模型连续两次未给出可解析的 JSON")
             return action, reply2
         return action, reply
+
+    def _chat(self, system: str, user: str) -> Reply:
+        """叫一次模型，并且**无论成败都记账**。
+
+        被截断的那次调用同样是真金白银。以前失败路径直接往上抛，账面只算成功的两次，
+        成本实测会低报一半——而那正是衡量「一局多少钱」的唯一数字，低报等于白测。
+
+        截断有**两种**，处置完全不同，所以这里是一条梯子而不是一次重试：
+
+        - 配额不够用（思维链 2200–3900 浮动，偶尔超一点）——把 `max_tokens` 放宽一倍就够。
+        - 思维链跑飞（实测有座位把 6000 token 全用来想、一个字正文都没写）——再放宽
+          也只是把「想不完」的额度翻倍，纯属烧钱。这时改试**劝它别想**：一次探针里
+          加上「直接给出 JSON 答案」后思维链归零、193 token 出完整答案；但同一措辞
+          随后连试 4 次全部照样跑飞，所以这一级只是兜底，不能当依赖。
+
+        两级都走完还不行，才认栽降级驻守。失败的每一次都进账，页面上看得见。
+        """
+        cap = None
+        nudge = ""
+        for attempt in range(3):
+            try:
+                reply = self.provider.chat(system, user + nudge, max_tokens=cap)
+            except BadOutput as exc:
+                self._bill(exc.reply)
+                if exc.kind != "truncated":
+                    raise
+                if attempt == 0 and exc.cap:
+                    cap = min(exc.cap * 2, 16384)
+                    log.info("%s 输出被截断（max_tokens=%s），放宽到 %s 重试",
+                             self.power, exc.cap, cap)
+                    continue
+                if not nudge:
+                    # 加到 8192 都填不满，说明不是「地方不够」而是「一直想」。
+                    # 这时候缩回一个小额度反而更稳：劝住了不用这么大，劝不住也不至于烧穿。
+                    cap = min(max(exc.cap, 1000), 2000)
+                    nudge = "\n\n（不要再推理，直接给出 JSON 答案。）"
+                    log.info("%s 的思维链吃光了 %s token，改为劝它直接作答",
+                             self.power, exc.cap)
+                    continue
+                raise
+            self._bill(reply)
+            return reply
+        raise ProviderError("输出被截断，放宽配额与要求直接作答都试过")  # pragma: no cover - 循环内必返回或抛出
 
     def _bill(self, reply: Reply) -> None:
         self.usage.calls += 1
@@ -192,8 +233,7 @@ class LLMSeat:
                 fix = (f"\n\n上次提交被裁判拒绝：{first_error}\n"
                        f"请给出合法的完整命令集（每支需要行动的部队都要有命令）。")
                 try:
-                    reply = self.provider.chat(system, user + fix)
-                    self._bill(reply)
+                    reply = self._chat(system, user + fix)
                 except ProviderError:
                     break
                 fixed = parse_action(reply.text)

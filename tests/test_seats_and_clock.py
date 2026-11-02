@@ -291,6 +291,30 @@ def test_runner_force_holds_when_seat_returns_without_orders(tmp_path, monkeypat
         assert arena.admin_state()["players"]["ITALY"]["ready"] is True
 
 
+def test_tick_survives_the_seat_table_changing_mid_flight(tmp_path, monkeypatch):
+    """座位表在遍历途中被改，不能让整轮白跑。
+
+    P1 实测时撞到的是 `RuntimeError: dictionary changed size during iteration`：
+    网页上勾/取消座位、脚本收回座位，都发生在别的线程里。异常被 `_loop` 吞成一条
+    ERROR 日志，表现只是「这一轮什么都没发生」——最难查的那种。
+    """
+    client, main, _ = started(tmp_path, monkeypatch, "k")
+    with client:
+        stop_background(main)
+        arena = main.arena()
+        seat = model_seat(main, "ITALY")
+
+        def act_and_mutate(_arena):
+            main._seats["FRANCE"] = LLMSeat("FRANCE", ScriptedProvider([{"pass": True}]))
+            main._seats.pop("ITALY", None)
+            return dict(skipped=True, why="模拟座位表变动")
+
+        seat.act = act_and_mutate
+        model_seat(main, "GERMANY")
+        main._runner.tick()   # 不该抛 RuntimeError
+        assert arena.admin_state()["players"]["GERMANY"]["ready"] is True
+
+
 def test_timeout_hold_leaves_a_busy_seat_alone(tmp_path, monkeypatch):
     """模型正在说话时别抢：抢了就是白花一次 token，还把它交的令盖掉。"""
     client, main, _ = started(tmp_path, monkeypatch, "k")

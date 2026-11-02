@@ -42,7 +42,11 @@ class SeatRunner:
 
         results = []
         revision = arena.data["revision"]
-        for power, seat in self.seats.items():
+        # 先拍快照再遍历：座位表是活的，网页上勾一个座位、或脚本收回座位，
+        # 都会在别的线程里往里插删。直接 `.items()` 遍历会撞
+        # `RuntimeError: dictionary changed size during iteration`——P1 实测时真的撞上了，
+        # 表现是「这一轮什么都没发生」，日志里只有一条 ERROR，很难往座位表上想。
+        for power, seat in list(self.seats.items()):
             if not seat.enabled:
                 continue
             info = state["players"].get(power, {})

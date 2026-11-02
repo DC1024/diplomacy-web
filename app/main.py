@@ -546,6 +546,8 @@ class SettingsReq(BaseModel):
     clear_key: bool = Field(False, description="要真的清掉密钥才传 true")
     model: str | None = None
     timeout: float | None = Field(None, ge=5, le=600)
+    max_tokens: int | None = Field(None, ge=256, le=32000,
+                                   description="单次输出上限，含推理型模型的思维链")
     price_in: float | None = Field(None, ge=0, description="¥ / 百万 input token")
     price_out: float | None = Field(None, ge=0, description="¥ / 百万 output token")
     budget_cny: float | None = Field(None, gt=0, description="单座位预算，超出自动转保底驻守")

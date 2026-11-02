@@ -28,10 +28,26 @@ class Reply:
         return self.prompt_tokens + self.completion_tokens
 
 
+class BadOutput(ProviderError):
+    """网关通了、钱花了，但拿回来的东西不能当命令用。
+
+    单独成一类是因为它和「连不上」的处置完全不同：
+    - 连不上：重试没意义，立刻兜底。
+    - 被截断：把输出上限调大就能救，而且**那次调用已经计费了**，得照样记账，
+      否则成本报表会把失败的尝试当成免费的——实测里这正好是一半的钱。
+    """
+
+    def __init__(self, message: str, reply: Reply, *, kind: str = "", cap: int = 0):
+        super().__init__(message)
+        self.reply = reply
+        self.kind = kind    # "truncated"（被 max_tokens 截断）| "empty"（正文为空）
+        self.cap = cap      # 本次用的 max_tokens，重试时据此翻倍
+
+
 class Provider(Protocol):
     name: str
 
-    def chat(self, system: str, user: str) -> Reply: ...
+    def chat(self, system: str, user: str, *, max_tokens: int | None = None) -> Reply: ...
 
 
 class ScriptedProvider:
@@ -48,7 +64,7 @@ class ScriptedProvider:
         self.repeat_last = repeat_last
         self.calls = 0
 
-    def chat(self, system: str, user: str) -> Reply:
+    def chat(self, system: str, user: str, *, max_tokens: int | None = None) -> Reply:
         idx = min(self.calls, len(self.script) - 1) if self.repeat_last else self.calls
         item = self.script[idx] if idx < len(self.script) else {"pass": True}
         self.calls += 1
@@ -95,22 +111,35 @@ def _is_private_host(url: str) -> bool:
 class OpenAICompatProvider:
     """OpenAI 兼容的 /v1/chat/completions（new-api、vLLM、官方 API 都适用）。"""
 
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 60.0):
+    # 为什么不是 900：推理型模型（deepseek-r1 这类、以及很多网关的 smart-split 路由）
+    # 会先在 `reasoning_content` 里烧掉一两千 token 的思维链，`max_tokens` 是**含思维链**
+    # 的总配额。900 的配额在思维链阶段就见底了，`content` 回来是空串——表现成
+    # 「模型连续两次未给出可解析的 JSON」，看着像模型不会输出 JSON，实际是没给它地方写。
+    # 实测这两点都是真的：单次 `completion_tokens` 中位数约 4300（思维链为主），
+    # 且同一条提示词重跑会在 200–8000 之间浮动。配额卡在 4096 恰好压在中位数上，
+    # 于是**一半的调用要重发**——那一次既慢一倍又白花一份钱。给到 8192 是「一次就够」
+    # 与「跑飞时不至于烧太狠」的折中：跑飞的样本在 8192 也填不满，交给下一级处理。
+    DEFAULT_MAX_TOKENS = 8192
+
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 120.0,
+                 max_tokens: int = DEFAULT_MAX_TOKENS):
         self.base_url = normalize_base(base_url)
         self.api_key = (api_key or "").strip()
         self.model = model
         self.timeout = timeout
+        self.max_tokens = int(max_tokens or self.DEFAULT_MAX_TOKENS)
         self.name = f"openai:{model}"
 
-    def chat(self, system: str, user: str) -> Reply:
+    def chat(self, system: str, user: str, *, max_tokens: int | None = None) -> Reply:
         import httpx
 
+        cap = int(max_tokens or self.max_tokens)
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
             "temperature": 0.7,
-            "max_tokens": 900,
+            "max_tokens": cap,
         }
         # 本机 ollama / vLLM / 内网网关常常不校验密钥，空 key 时不发这个头，
         # 免得 `Authorization: Bearer ` 被某些网关判成「给了个错的凭证」而 401
@@ -126,13 +155,46 @@ class OpenAICompatProvider:
             raise ProviderError(f"HTTP {r.status_code}：{r.text[:200]}")
         try:
             data = r.json()
-            text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, json.JSONDecodeError) as exc:
+            choice = data["choices"][0]
+            message = choice.get("message") or {}
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise ProviderError(f"响应格式异常：{r.text[:200]}") from exc
+
+        text = message.get("content") or ""
+        finish = choice.get("finish_reason") or ""
         usage = data.get("usage") or {}
-        return Reply(text=text or "",
-                     prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                     completion_tokens=int(usage.get("completion_tokens") or 0))
+        reply = Reply(text=text,
+                      prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                      completion_tokens=int(usage.get("completion_tokens") or 0))
+
+        if not text.strip():
+            # finish=length 的空正文 = 配额在思维链阶段就见底了：这不是「模型不会说话」，
+            # 是「没地方写」，按截断处理，让上层有机会放宽配额再来一次。
+            kind = "truncated" if finish == "length" else "empty"
+            raise BadOutput(_empty_message(message, usage, finish, cap), reply,
+                            kind=kind, cap=cap)
+        if finish == "length":
+            raise BadOutput(f"输出被 max_tokens={cap} 截断（completion {reply.completion_tokens} token），"
+                            f"拿到的不是完整 JSON", reply, kind="truncated", cap=cap)
+        return reply
+
+
+def _empty_message(message: dict, usage: dict, finish: str, cap: int) -> str:
+    """正文为空时说清楚「为什么空」。
+
+    只说「未给出可解析的 JSON」会把排查引向提示词——而实测的原因是**配额被思维链吃光了**，
+    改提示词一个字都不会变。这里把思维链长度和配额一起报出来，看一眼就知道往哪调。
+    """
+    detail = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = int(detail.get("reasoning_tokens") or 0)
+    has_cot = bool(message.get("reasoning_content") or message.get("reasoning"))
+    bits = [f"finish_reason={finish or '?'}"]
+    if reasoning_tokens or has_cot:
+        bits.append(f"思维链占了 {reasoning_tokens or '?'} token")
+        bits.append(f"max_tokens={cap} 不足以覆盖思维链+正文")
+    else:
+        bits.append(f"completion={usage.get('completion_tokens') or 0} token")
+    return "模型返回了空正文（" + "，".join(bits) + "）"
 
 
 def from_env() -> Provider | None:
@@ -149,7 +211,16 @@ def from_env() -> Provider | None:
     model = os.environ.get("LLM_MODEL", "").strip()
     if not (base and model):
         return None
-    return OpenAICompatProvider(base, key, model, float(os.environ.get("LLM_TIMEOUT", "60") or 60))
+    return OpenAICompatProvider(base, key, model,
+                                timeout=float(os.environ.get("LLM_TIMEOUT", "120") or 120),
+                                max_tokens=_env_cap())
+
+
+def _env_cap() -> int:
+    try:
+        return int(os.environ.get("LLM_MAX_TOKENS", "") or OpenAICompatProvider.DEFAULT_MAX_TOKENS)
+    except ValueError:
+        return OpenAICompatProvider.DEFAULT_MAX_TOKENS
 
 
 def probe(provider: Provider, *, timeout: float = 20.0) -> dict:
@@ -167,7 +238,8 @@ def probe(provider: Provider, *, timeout: float = 20.0) -> dict:
     try:
         if isinstance(provider, OpenAICompatProvider):
             provider = OpenAICompatProvider(provider.base_url, provider.api_key,
-                                            provider.model, timeout=limit)
+                                            provider.model, timeout=limit,
+                                            max_tokens=provider.max_tokens)
         reply = provider.chat("你在做连通性自检。", "只回复两个字：通了")
     except ProviderError as exc:
         return dict(ok=False, ms=int((time.monotonic() - started) * 1000), error=str(exc))

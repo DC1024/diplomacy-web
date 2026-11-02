@@ -145,6 +145,8 @@ def test_bad_values_are_rejected(srv):
     assert put(client, budget_cny=-1).status_code == 422
     assert put(client, timeout=1).status_code == 422
     assert put(client, keep_hist=-1).status_code == 422
+    # 输出上限同理：给 0 等于让模型别说话，给 99999 是替人烧钱
+    assert put(client, max_tokens=100).status_code == 422
 
 
 def test_broken_config_file_falls_back_to_env(srv, monkeypatch):
