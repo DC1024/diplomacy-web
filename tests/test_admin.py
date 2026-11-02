@@ -4,13 +4,15 @@
 未设 ADMIN_KEY 时它对本机单人模式是便利，对公网就是信息泄露，所以这两条路径必须有测试守着。
 """
 import importlib
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 
-def make_server(tmp_path, monkeypatch, admin_key):
+def make_server(tmp_path, monkeypatch, admin_key, host="0.0.0.0"):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("HOST", host)
     if admin_key is None:
         monkeypatch.delenv("ADMIN_KEY", raising=False)
     else:
@@ -79,3 +81,44 @@ def test_seat_endpoints_stay_open_with_admin_key(tmp_path, monkeypatch):
         r = client.get("/api/me", headers={"X-Seat-Token": tokens["FRANCE"]})
         assert r.status_code == 200
         assert r.json()["power"] == "FRANCE"
+
+
+def risky(h: dict) -> bool:
+    """前端红条出现的条件，与 index.html 的 renderWarn 保持一致。"""
+    return h["admin_required"] is False and h["exposed"] is True
+
+
+@pytest.mark.parametrize("host,exposed", [
+    ("0.0.0.0", True),      # 容器默认值：整个局域网可达
+    ("::", True),
+    ("192.168.43.18", True),
+    ("127.0.0.1", False),   # 只本机能连
+    ("localhost", False),
+])
+def test_healthz_reports_listen_scope(tmp_path, monkeypatch, host, exposed):
+    with make_server(tmp_path, monkeypatch, None, host=host) as client:
+        assert client.get("/healthz").json()["exposed"] is exposed
+
+
+@pytest.mark.parametrize("admin_key,host,expect", [
+    (None, "0.0.0.0", True),     # 无密钥 + 对外监听：真正危险
+    ("s3cret", "0.0.0.0", False),  # 有人在门口查密钥
+    (None, "127.0.0.1", False),    # 没有门，但只有本机能走到
+])
+def test_warning_matrix(tmp_path, monkeypatch, admin_key, host, expect):
+    with make_server(tmp_path, monkeypatch, admin_key, host=host) as client:
+        h = client.get("/healthz").json()
+    assert risky(h) is expect
+
+
+def test_page_wires_the_warning():
+    """页面上的红条必须真的接在 /healthz 上。
+
+    这条断言盯着"接线"而不是视觉效果：告警文案怎么改都行，
+    但元素被删、或 boot() 不再调用 renderWarn，就等于这个 P0 又回来了。
+    """
+    html = (Path(__file__).resolve().parents[1] / "app" / "static" / "index.html").read_text("utf-8")
+    assert 'id="warn"' in html
+    assert 'id="warnMini"' in html
+    assert "function renderWarn(" in html
+    assert "renderWarn(h)" in html

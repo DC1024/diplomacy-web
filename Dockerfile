@@ -14,7 +14,10 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# 顺带验证声明的依赖真的能 import：httpx 是模型座位的运行时依赖，
+# 只写在 requirements-dev 里会让镜像"能启动、一对话就 ModuleNotFoundError"。
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -c "import fastapi, uvicorn, diplomacy, httpx"
 
 COPY app ./app
 

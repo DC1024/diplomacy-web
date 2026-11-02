@@ -2,12 +2,12 @@
 
 标准七国《外交》（Diplomacy）的网页版。一条命令起服务，浏览器里打完整局。
 
-> **B0 阶段**：单局热座模式。7 个座位全部由你（或围坐的几个人）轮流操作，规则、结算、私信保密、
-> 命令校验全部走真裁判。LLM 玩家与多房间在后续版本。
+> **当前阶段**：单局热座 + 模型入座。7 个座位可以自己轮流操作，也可以勾几个交给大模型，
+> 人和模型混打一局。规则、结算、私信保密、命令校验全部走真裁判。
 
 **English TL;DR** — A self-hosted web version of standard 7-player Diplomacy. Docker one-liner,
-single match, hot-seat mode, real referee (private messaging, simultaneous adjudication, order
-validation). LLM seats and multi-room are on the roadmap.
+single match, hot-seat plus LLM seats over any OpenAI-compatible endpoint, real referee
+(private messaging, simultaneous adjudication, order validation). Multi-room is on the roadmap.
 
 ---
 
@@ -79,7 +79,29 @@ A PAR B                增兵
 
 ### 想几个人一起玩
 
-当前是热座：一台电脑轮流操作。要不泄漏私信，由一个人专门操作一个国家的窗口，或等 B1 的多座位令牌分发。
+当前是热座：一台电脑轮流操作。要不泄漏私信，由一个人专门操作一个国家的窗口，或等 B2 的
+多座位令牌分发。勾几个座位给模型，剩下的自己打，是现在最省事的混合玩法（见下节）。
+
+---
+
+## 让模型入座
+
+「模型」标签页里勾选国家即可，勾上就由模型接管，取消就收回人类。模型每回合只看到
+**最近 3 段结算 + 最近 30 条消息 + 局面**，更早的历史压成一行摘要——这是成本能收住的关键。
+输出不是合法 JSON 或者命令不合法会自动修一次，仍不行就降级为合法驻守，不会卡住对局。
+
+需要任意 OpenAI 兼容端点：
+
+```bash
+docker run -d -p 8080:8080 \
+  -e LLM_BASE_URL=https://api.deepseek.com/v1 \
+  -e LLM_API_KEY=sk-... \
+  -e LLM_MODEL=deepseek-chat \
+  -v "$PWD/data:/data" ghcr.io/dc1024/diplomacy-web:latest
+```
+
+没有任何 API key 也想跑一遍流程？`LLM_PROVIDER=scripted` 会用内置脚本座位代替模型，
+用来验证前端与结算链路，不产生费用。
 
 ---
 
@@ -96,9 +118,11 @@ A PAR B                增兵
 | 一键新局（旧存档自动备份） | ✅ |
 | 整局打满（1901→终局，约 55 阶段） | ✅ 有回归测试 |
 | 管理密钥保护建局/清档 | ✅ `ADMIN_KEY` |
+| 无密钥 + 对外监听时页面红条告警 | ✅ |
+| 模型入座（OpenAI 兼容）+ 上下文裁剪 + 单座位预算 | ✅ 离线全程验证 |
+| 模型成本实测（一局 < ¥20） | ⏳ 待接真实模型验收 |
 | Docker / compose / 健康检查 | ✅ |
 | 地图可视化 | ❌ 文字界面 |
-| LLM 玩家 | ❌ 下一版 |
 | 多房间 / 账号 / 观战 | ❌ 下一版 |
 | 阶段时钟 / 超时托管 | ❌ 下一版 |
 
@@ -133,9 +157,15 @@ Arena（app/engine/arena.py，vendored）
 |---|---|---|
 | `DATA_DIR` | `./data` | 存档目录（Docker 里是 `/data`） |
 | `ADMIN_KEY` | 空 | 管理员密钥。**留空时建局/清档不鉴权，只适合本机单人** |
-| `HOST` | `0.0.0.0` | 监听地址 |
+| `HOST` | `0.0.0.0` | 监听地址。设 `127.0.0.1` 表示只听本机 |
 | `PORT` | `8080` | 端口 |
 | `LOG_LEVEL` | `info` | 日志级别 |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | 空 | 任意 OpenAI 兼容端点；都不填则模型座位不可用 |
+| `LLM_PROVIDER` | — | 填 `scripted` 用内置脚本座位，离线演练不花钱 |
+| `LLM_BUDGET_CNY` | `20` | 单个座位的预算上限，撞线即停并降级为驻守 |
+| `LLM_PRICE_IN` / `LLM_PRICE_OUT` | `2` / `8` | 估价用单价（¥/百万 token），按供应商实际价格改 |
+| `LLM_KEEP_HIST` / `LLM_KEEP_MSGS` | `3` / `30` | 上下文窗口：保留几段结算、几条消息 |
+| `LLM_INTERVAL` | `2` | 后台推进模型的轮询间隔（秒） |
 
 ### 关于 `ADMIN_KEY`（对外部署必读）
 
@@ -150,7 +180,9 @@ docker run -d -p 8080:8080 -e ADMIN_KEY="$(openssl rand -hex 16)" \
   -v "$PWD/data:/data" ghcr.io/dc1024/diplomacy-web:latest
 ```
 
-`GET /healthz` 里的 `admin_required` 反映当前是否为受保护状态。
+`GET /healthz` 里的 `admin_required` 反映当前是否为受保护状态，`exposed` 反映监听是否超出本机。
+**两个条件同时踩到（没密钥 + 对外监听）时页面顶部会挂一条红色告警**，直接说明令牌会被谁拿走。
+告警可以收起，状态记在浏览器本地；它只是提示，不是拦截——真要对公网开就得设密钥。
 
 ---
 
@@ -162,10 +194,11 @@ ruff check .
 pytest -q
 ```
 
-测试覆盖三件最容易坏的事：令牌鉴权、私信隔离、结算门控。改完裁判逻辑务必跑一遍。
+测试盯着四件最容易坏的事：令牌鉴权、私信隔离、结算门控、模型上下文窗口。
+其中整局回归让 7 个脚本座位把 1901 打到终局，任何一环退化都会立刻红。
 
-CI 在每次 push 时跑 lint + 测试 + 构建镜像 + 容器冒烟。推 `v*` 标签会构建
-`linux/amd64` 与 `linux/arm64` 双架构镜像并推到 GHCR。
+CI 在每次 push 时跑 lint + 测试 + 构建镜像 + 容器冒烟（含绑定挂载权限与管理密钥）。
+推 `v*` 标签会构建 `linux/amd64` 与 `linux/arm64` 双架构镜像并推到 GHCR。
 
 ---
 
@@ -173,8 +206,8 @@ CI 在每次 push 时跑 lint + 测试 + 构建镜像 + 容器冒烟。推 `v*` 
 
 进度、待办与验收标准见 [TODO.md](TODO.md)。
 
-- **B0（当前）** 单局热座，文字界面
-- **B1** LLM 座位：`function calling` 直连 + 滚动摘要控成本，一个人打 6 个模型
+- **B0（已完成）** 单局热座，文字界面
+- **B1（代码完成，待实测成本）** 模型座位：OpenAI 兼容协议 + 上下文裁剪 + 单座位预算
 - **B2** 多座位令牌分发、阶段时钟、掉线自动驻守
 - **C** 地图可视化、多房间、复盘页
 

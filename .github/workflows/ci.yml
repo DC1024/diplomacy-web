@@ -96,7 +96,7 @@ jobs:
           done
           echo "--- healthz ---"
           curl -fsS http://127.0.0.1:8082/healthz \
-            | python -c "import json,sys; d=json.load(sys.stdin); assert d['admin_required'] is True, d; print('admin_required ok')"
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['admin_required'] is True, d; assert 'exposed' in d, d; print('admin_required ok')"
           echo "--- 无密钥应 403 ---"
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8082/api/match)
           test "$code" = "403" && echo "403 ok"
@@ -109,3 +109,28 @@ jobs:
       - name: 清理管理密钥容器
         if: always()
         run: docker rm -f dw-adm || true
+
+      - name: 模型座位冒烟（脚本模型，不花钱）
+        run: |
+          docker run -d --name dw-llm -p 8083:8080 -e LLM_PROVIDER=scripted diplomacy-web:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8083/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS -X POST http://127.0.0.1:8083/api/match > /dev/null
+          echo "--- 把意大利交给模型 ---"
+          curl -fsS -X POST http://127.0.0.1:8083/api/llm/seat \
+            -H 'Content-Type: application/json' -d '{"power":"ITALY","enabled":true}' \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['enabled'] is True, d; print('seat on ok')"
+          echo "--- 推一轮，模型应自己交出合法命令 ---"
+          curl -fsS -X POST http://127.0.0.1:8083/api/llm/tick \
+            | python -c "import json,sys; d=json.load(sys.stdin); r=[x for x in d['results'] if not x.get('skipped')]; assert r and r[0]['ok'], d; print('tick ok')"
+          echo "--- 上下文窗口有内容 ---"
+          curl -fsS 'http://127.0.0.1:8083/api/llm/context?power=ITALY' \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['text'] and d['stats']['chars']>0, d; print('context ok', d['stats'])"
+      - name: 失败时打印模型座位日志
+        if: failure()
+        run: docker logs dw-llm || true
+      - name: 清理模型座位容器
+        if: always()
+        run: docker rm -f dw-llm || true

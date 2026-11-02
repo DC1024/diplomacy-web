@@ -32,6 +32,9 @@ aside{width:200px;border-right:1px solid var(--line);padding:10px;overflow:auto;
 .seat .rd{font-size:10px;color:var(--ok)}
 .seat.dead{opacity:.4}
 .seat small{display:block;font-size:10px;color:var(--muted)}
+i.llmtag{font-style:normal;font-size:10px;color:#1a1206;background:var(--accent);border-radius:3px;padding:0 4px;margin-left:5px;vertical-align:1px}
+#llmSeats .seat{border:1px solid var(--line);margin-bottom:6px;padding:8px}
+#llmSeats input[type=checkbox]{width:15px;flex:0 0 15px;accent-color:var(--accent)}
 section.panel{flex:1;display:flex;flex-direction:column;min-width:0}
 .tabs{display:flex;gap:2px;padding:8px 12px 0;border-bottom:1px solid var(--line)}
 .tabs button{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);padding:6px 12px;cursor:pointer;font-size:13px}
@@ -61,6 +64,16 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
 #toast.err{border-left-color:var(--bad)}
 #toast.ok{border-left-color:var(--ok)}
 .banner{padding:10px 16px;background:#2a1f14;border-bottom:1px solid #4a3a1c;color:var(--accent);font-size:13px}
+#warn{background:#3a1114;border-bottom:1px solid #7a2028;color:#ffbcb4;font-size:13px;line-height:1.7}
+#warn .wfull{display:flex;gap:14px;align-items:flex-start;padding:11px 16px}
+#warn .wbody{flex:1}
+#warn b{color:#ff8f80}
+#warn code{background:#00000045;border-radius:4px;padding:1px 5px;color:#ffd9d2;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+#warn button{background:transparent;border:1px solid #7a2028;color:#ffbcb4;border-radius:5px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap;margin:0}
+#warn button:hover{background:#4a161a}
+#warn .wbrief{display:none;padding:6px 16px;cursor:pointer;color:#ff8f80}
+#warn.mini .wfull{display:none}
+#warn.mini .wbrief{display:block}
 .hidden{display:none!important}
 @media(max-width:700px){aside{width:100%;border-right:none;border-bottom:1px solid var(--line);max-height:150px}main{flex-direction:column}}
 </style>
@@ -68,12 +81,26 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
 <body>
 <header>
   <div class="brand">七国<b>纵横</b></div>
-  <span class="tag">B0 · 热座</span>
+  <span class="tag">B1 · 热座+模型</span>
   <div class="phase" id="phase">读取中…</div>
   <input id="adminKey" class="adm" type="password" placeholder="管理密钥" autocomplete="off" hidden>
   <button id="btnRefresh">刷新</button>
   <button id="btnNew">新局</button>
 </header>
+<div id="warn" class="hidden">
+  <div class="wfull">
+    <div class="wbody">
+      <b>危险：这个部署对网络开放，却没有设管理密钥。</b><br>
+      任何能打开本页的人，都能用 <code>POST /api/match</code> 拿到全部 7 个座位令牌——
+      等于一次读完七国的所有私信，也能直接清空存档。容器默认监听 <code>0.0.0.0</code>，
+      再用 <code>-p 8080:8080</code> 发布出去，整个局域网就都能连。<br>
+      正式对局请加 <code>-e ADMIN_KEY=你的长随机串</code> 后重启。只在本机玩，把端口映射改成
+      <code>-p 127.0.0.1:8080:8080</code>，然后点右边「收起」——这条提示会记住你的选择。
+    </div>
+    <button id="warnMini">收起</button>
+  </div>
+  <div class="wbrief" id="warnBrief">⚠ 未设管理密钥，令牌对网络开放 —— 点此看详情</div>
+</div>
 <div class="banner" id="banner">热座模式：你持有全部七个座位的令牌，点左侧国家即切换视角。正式对局请把令牌分发给不同玩家。</div>
 <main>
   <aside id="seats"></aside>
@@ -83,6 +110,7 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
       <button data-tab="send">发信</button>
       <button data-tab="orders">军令</button>
       <button data-tab="inbox">收件箱</button>
+      <button data-tab="llm">模型</button>
     </div>
     <div class="pane on" id="pane-brief"><div id="brief"></div></div>
 
@@ -113,6 +141,22 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
       </div>
       <button class="btn" id="btnInbox">查询</button>
       <pre class="out" id="inboxOut">—</pre>
+    </div>
+
+    <div class="pane" id="pane-llm">
+      <div class="hint" id="llmHead">读取中…</div>
+      <div id="llmSeats"></div>
+      <div class="row" style="margin-top:12px">
+        <div><button class="btn ghost" id="btnTick">推一轮</button></div>
+        <div><button class="btn ghost" id="btnCtx">看上下文</button></div>
+      </div>
+      <pre class="out hidden" id="ctxOut"></pre>
+      <div class="hint">
+        勾选即把该国交给模型，取消则收回给人类。<br>
+        模型每回合只看到「最近 3 段结算 + 最近 30 条消息 + 局面」，
+        更早的历史压成一行摘要——这是成本能收住的关键。<br>
+        输出不可用或超出预算时，自动降级为合法驻守，不会卡住对局。
+      </div>
     </div>
   </section>
 </main>
@@ -174,7 +218,7 @@ function renderSeats(st){
     const ready=p.ready?"<span class='rd'>已交</span>":"";
     return `<div class="seat${seat===c?" on":""}${dead}" data-p="${c}">
       <span class="dot" style="background:var(--${k})"></span>
-      <span class="nm">${n}${ready}</span>
+      <span class="nm">${n}${llmSeats[c]?"<i class='llmtag'>模型</i>":""}${ready}</span>
       <span class="cnt">${cnt}城/${un}军</span>
     </div>`;
   }).join("");
@@ -196,6 +240,18 @@ function renderBrief(text){
 }
 
 let lastErr="";
+
+// 未设管理密钥 + 监听在非回环地址 = /api/match 会把 7 个令牌发给任何访问者。
+// 只在「确实危险」时出现；收起状态记在 localStorage，刷新不会反复弹。
+const WARNMINI="dw.warn.mini";
+function renderWarn(h){
+  const el=$("#warn");
+  const risky=!!(h && h.admin_required===false && h.exposed);
+  el.classList.toggle("hidden",!risky);
+  if(risky) el.classList.toggle("mini",localStorage.getItem(WARNMINI)==="1");
+}
+$("#warnMini").onclick=e=>{e.stopPropagation();localStorage.setItem(WARNMINI,"1");$("#warn").classList.add("mini");};
+$("#warnBrief").onclick=()=>{localStorage.removeItem(WARNMINI);$("#warn").classList.remove("mini");};
 
 async function refresh(){
   if(busy) return;
@@ -226,6 +282,7 @@ async function boot(){
   load();
   try{
     const h=await api("/healthz");
+    renderWarn(h);
     if(h.admin_required) showAdmin(false);
     const d=await api("/api/match",{method:"POST"});
     tokens=d.tokens;
@@ -233,6 +290,7 @@ async function boot(){
     save();
     renderSeats(d.summary);
     $("#adminKey").classList.remove("bad");
+    await loadLlm();
     await refresh();
   }catch(e){
     const needKey=String(e.message||"").includes("管理员密钥");
@@ -252,6 +310,7 @@ document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
   document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("on",x===b));
   document.querySelectorAll(".pane").forEach(p=>p.classList.toggle("on",p.id==="pane-"+b.dataset.tab));
   history.replaceState(null,"","#"+b.dataset.tab);
+  if(b.dataset.tab==="llm") loadLlm();
 });
 (function initTab(){
   const want=(location.hash||"").replace("#","");
@@ -296,6 +355,69 @@ $("#btnInbox").onclick=async()=>{
   try{
     const d=await api("/api/inbox?"+q.toString());
     $("#inboxOut").textContent=d.text;
+  }catch(e){ toast(e.message,"err"); }
+};
+
+// ---------- 模型页签 ----------
+let llmSeats={};
+
+function renderLlm(d){
+  const seats=d.seats||{}; llmSeats=seats;
+  $("#llmHead").innerHTML = d.configured
+    ? `模型 <b>${esc(d.provider)}</b> ｜ 预算 ¥${d.budget_cny}/局 ｜ 已用 ¥${d.total.cost_cny} · ${d.total.tokens} token`
+      + ` ｜ 上下文窗口 ${d.context.keep_history} 段结算 / ${d.context.keep_messages} 条消息`
+    : "未配置模型：设置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 后重启；离线演练用 LLM_PROVIDER=scripted";
+  $("#llmSeats").innerHTML=POWERS.map(([c,n,k])=>{
+    const s=seats[c], u=(s&&s.usage)||{};
+    const right=s
+      ? `${u.calls||0} 次 · ${s.tokens||0} tok · ¥${(u.cost_cny||0).toFixed(3)}`
+        + (u.fallbacks?` · 降级 ${u.fallbacks}`:"")
+        + (s.enabled?"":` · ${esc(s.stop_reason||"已停用")}`)
+      : "人类操作";
+    return `<div class="seat" data-p="${c}">
+      <input type="checkbox" data-p="${c}" ${s?"checked":""}>
+      <span class="dot" style="background:var(--${k})"></span>
+      <span class="nm">${n}</span>
+      <span class="cnt">${right}</span>
+    </div>`;
+  }).join("");
+
+  $("#llmSeats").querySelectorAll("input[type=checkbox]").forEach(box=>{
+    box.onchange=async()=>{
+      const p=box.dataset.p;
+      try{
+        await api("/api/llm/seat",{method:"POST",body:JSON.stringify({power:p,enabled:box.checked})});
+        toast(box.checked?(NAME[p]+" 已交给模型"):(NAME[p]+" 已收回人类"),"ok");
+        await loadLlm(); await refresh();
+      }catch(e){ box.checked=!box.checked; toast(e.message,"err"); }
+    };
+  });
+}
+
+async function loadLlm(){
+  try{ renderLlm(await api("/api/llm")); }
+  catch(e){ $("#llmHead").textContent="读取失败："+e.message; }
+}
+
+$("#btnTick").onclick=async()=>{
+  try{
+    const d=await api("/api/llm/tick",{method:"POST"});
+    const acted=(d.results||[]).filter(r=>!r.skipped);
+    toast(acted.length
+      ? acted.map(r=>NAME[r.power]+"："+(r.ok?"已行动":"失败")).join("\n")
+      : "本阶段没有待行动的模型座位（后台会自动推进）","ok");
+    await loadLlm(); await refresh();
+  }catch(e){ toast(e.message,"err"); }
+};
+
+$("#btnCtx").onclick=async()=>{
+  try{
+    const d=await api("/api/llm/context?power="+encodeURIComponent(seat));
+    $("#ctxOut").classList.remove("hidden");
+    $("#ctxOut").textContent=`${NAME[seat]} 的上下文：${d.stats.chars} 字 ≈ ${d.stats.tokens} token`
+      + `（保留 ${d.stats.kept_history} 段结算 / ${d.stats.kept_messages} 条消息，`
+      + `略去 ${d.dropped_history} 段历史 / ${d.dropped_messages} 条消息）\n`
+      + "─".repeat(40)+"\n"+d.digest+"\n"+"─".repeat(40)+"\n"+d.text;
   }catch(e){ toast(e.message,"err"); }
 };
 
