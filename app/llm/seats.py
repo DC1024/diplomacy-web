@@ -72,17 +72,31 @@ class LLMSeat:
         self.keep_msgs = keep_msgs
         self.usage = Usage()
         self.enabled = True
+        self.busy = False  # 正在跟模型说话：阶段时钟看到它会先让一轮，别抢
         self.stop_reason = ""
+        self.last_error = ""  # 最近一次故障原因，成功一次就清掉；页面上挂个 ⚠ 提示
 
     # ---------- 对外 ----------
     def status(self) -> dict:
         return dict(power=self.power, provider=getattr(self.provider, "name", "?"),
-                    enabled=self.enabled, stop_reason=self.stop_reason,
-                    budget_cny=self.budget_cny, persona=self.persona,
+                    enabled=self.enabled, busy=self.busy, stop_reason=self.stop_reason,
+                    last_error=self.last_error, budget_cny=self.budget_cny,
+                    persona=self.persona,
                     usage=asdict(self.usage), tokens=self.usage.tokens)
 
     def act(self, arena) -> dict:
-        """让这个座位走一步。返回一份可直接塞进 API 响应的诊断信息。"""
+        """让这个座位走一步。返回一份可直接塞进 API 响应的诊断信息。
+
+        `busy` 是给外部看的「它正在调模型」信号：一次调用最长 60s（provider 超时），
+        这期间阶段时钟不该替它驻守——否则模型白花一次 token，交的令还被覆盖。
+        """
+        self.busy = True
+        try:
+            return self._act(arena)
+        finally:
+            self.busy = False
+
+    def _act(self, arena) -> dict:
         if not self.enabled:
             return dict(power=self.power, skipped=True, why=self.stop_reason or "已停用")
 
@@ -195,6 +209,7 @@ class LLMSeat:
                 first_error = str(exc)
                 continue
             self._settle(arena)
+            self.last_error = ""
             return dict(ok=True, orders=orders, note=result.get("text", "")[:160])
 
         return self._submit_holds(arena, first_error or "模型未给出可用命令")
@@ -207,6 +222,7 @@ class LLMSeat:
         """
         if degraded:
             self.usage.fallbacks += 1
+            self.last_error = why[:200]
         else:
             self.usage.passes += 1
         try:

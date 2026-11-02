@@ -35,6 +35,7 @@ aside{width:200px;border-right:1px solid var(--line);padding:10px;overflow:auto;
 i.llmtag{font-style:normal;font-size:10px;color:#1a1206;background:var(--accent);border-radius:3px;padding:0 4px;margin-left:5px;vertical-align:1px}
 #llmSeats .seat{border:1px solid var(--line);margin-bottom:6px;padding:8px}
 #llmSeats input[type=checkbox]{width:15px;flex:0 0 15px;accent-color:var(--accent)}
+.llmerr{font-style:normal;color:#e0a33e;margin-left:5px;cursor:help}
 section.panel{flex:1;display:flex;flex-direction:column;min-width:0}
 .tabs{display:flex;gap:2px;padding:8px 12px 0;border-bottom:1px solid var(--line)}
 .tabs button{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);padding:6px 12px;cursor:pointer;font-size:13px}
@@ -64,6 +65,15 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
 #toast.err{border-left-color:var(--bad)}
 #toast.ok{border-left-color:var(--ok)}
 .banner{padding:10px 16px;background:#2a1f14;border-bottom:1px solid #4a3a1c;color:var(--accent);font-size:13px}
+.clock{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.clock.warn{color:var(--bad)}
+#boundTag{font-size:11px;color:#1a1206;background:var(--accent);border-radius:4px;padding:1px 7px}
+.seat.locked{cursor:not-allowed;opacity:.55}
+.linkrow{display:flex;gap:8px;align-items:center;margin-top:7px;font-size:12px}
+.linkrow .nm{flex:0 0 54px;color:var(--muted)}
+.linkrow code{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:5px 8px;overflow:auto;white-space:nowrap;font-size:11px;font-family:ui-monospace,Consolas,monospace}
+.linkrow button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;margin:0;white-space:nowrap}
+.linkrow button:hover{border-color:var(--muted)}
 #warn{background:#3a1114;border-bottom:1px solid #7a2028;color:#ffbcb4;font-size:13px;line-height:1.7}
 #warn .wfull{display:flex;gap:14px;align-items:flex-start;padding:11px 16px}
 #warn .wbody{flex:1}
@@ -83,6 +93,9 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
   <div class="brand">七国<b>纵横</b></div>
   <span class="tag">B1 · 热座+模型</span>
   <div class="phase" id="phase">读取中…</div>
+  <span class="clock hidden" id="deadline"></span>
+  <span id="boundTag" class="hidden"></span>
+  <button id="btnUnbind" class="hidden">退出绑定</button>
   <input id="adminKey" class="adm" type="password" placeholder="管理密钥" autocomplete="off" hidden>
   <button id="btnRefresh">刷新</button>
   <button id="btnNew">新局</button>
@@ -111,6 +124,7 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
       <button data-tab="orders">军令</button>
       <button data-tab="inbox">收件箱</button>
       <button data-tab="llm">模型</button>
+      <button data-tab="admin" id="tabAdmin">管理</button>
     </div>
     <div class="pane on" id="pane-brief"><div id="brief"></div></div>
 
@@ -158,14 +172,33 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
         输出不可用或超出预算时，自动降级为合法驻守，不会卡住对局。
       </div>
     </div>
+
+    <div class="pane" id="pane-admin">
+      <label>分发座位（一人一条，各自只看得到自己那国）</label>
+      <button class="btn ghost" id="btnLinks">生成 7 条座位链接</button>
+      <div class="hint" id="linkHint">
+        把每条链接单独发给对应的玩家。链接里带着该国令牌——谁拿到就等于拿到该国的私信和交令权，<b>不要群发</b>。
+        对方打开后只能看见自己那一国，切不了国家。
+      </div>
+      <div id="linksOut"></div>
+      <label style="margin-top:22px">对局控制</label>
+      <div class="row">
+        <div><button class="btn ghost" id="btnPause">暂停 / 继续</button></div>
+        <div><button class="btn ghost" id="btnForce">强制结算</button></div>
+      </div>
+      <div class="hint">
+        强制结算会把所有还没交令的国家按驻守处理，然后立即推进阶段——有人掉线时用这个，别干等。
+      </div>
+    </div>
   </section>
 </main>
 <div id="toast"></div>
 <script>
 const POWERS=[["AUSTRIA","奥地利","a"],["ENGLAND","英国","e"],["FRANCE","法国","f"],["GERMANY","德国","g"],["ITALY","意大利","i"],["RUSSIA","俄国","r"],["TURKEY","土耳其","t"]];
 const NAME=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
-const KEY="dw.prefs.v1";
+const KEY="dw.prefs.v1", BOUND="dw.bound.v1";
 let tokens={}, seat="ITALY", timer=null, busy=false, adminKey="";
+let bound=null, lastState=null, deadlineAt=0;
 
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
@@ -202,6 +235,48 @@ function load(){
   if(adminKey) $("#adminKey").value=adminKey;
 }
 
+// ---- 座位链接：一人一条，只看自己那一国 ----
+// 链接里带该国令牌。取走后立刻从地址栏抹掉，免得截图/转发 URL 时把令牌带出去。
+function takeSeatLink(){
+  const q=new URLSearchParams(location.search||"");
+  const p=(q.get("seat")||"").toUpperCase(), t=q.get("t")||"";
+  if(!NAME[p]||!t) return null;
+  history.replaceState(null,"",location.pathname+(location.hash||""));
+  return {power:p,token:t};
+}
+
+function pickBound(){
+  const fromLink=takeSeatLink();
+  if(fromLink){
+    bound=fromLink;
+    localStorage.setItem(BOUND,JSON.stringify(bound));
+  }else{
+    try{ const b=JSON.parse(localStorage.getItem(BOUND)||"null"); if(b&&NAME[b.power]&&b.token) bound=b; }catch(e){}
+  }
+  if(!bound) return;
+  tokens={[bound.power]:bound.token};
+  seat=bound.power;
+  applyBound();
+}
+
+function applyBound(){
+  $("#boundTag").textContent="已绑定："+NAME[bound.power];
+  $("#boundTag").classList.remove("hidden");
+  $("#btnUnbind").classList.remove("hidden");
+  // 玩家不该看见的东西：开新局、模型/管理两个标签、管理密钥输入、部署告警
+  ["#btnNew","#adminKey","#warn"].forEach(sel=>$(sel).classList.add("hidden"));
+  document.querySelectorAll('[data-tab="llm"],[data-tab="admin"]').forEach(el=>el.classList.add("hidden"));
+  ["#pane-llm","#pane-admin"].forEach(sel=>$(sel).classList.add("hidden"));
+  if(location.hash==="#llm"||location.hash==="#admin") document.querySelector('[data-tab="brief"]').click();
+  $("#banner").textContent="你是"+NAME[bound.power]+"：只持有本国令牌，别国的私信看不到，也切不过去。";
+}
+
+$("#btnUnbind").onclick=()=>{
+  if(!confirm("退出绑定后会回到热座模式（需要重新建局/输入密钥），确定？")) return;
+  localStorage.removeItem(BOUND);
+  location.href=location.pathname;
+};
+
 $("#adminKey").oninput=()=>{
   adminKey=$("#adminKey").value.trim();
   $("#adminKey").classList.remove("bad");
@@ -222,7 +297,10 @@ function renderSeats(st){
       <span class="cnt">${cnt}城/${un}军</span>
     </div>`;
   }).join("");
-  el.querySelectorAll(".seat").forEach(e=>e.onclick=()=>{seat=e.dataset.p;save();renderSeats(st);refresh();});
+  el.querySelectorAll(".seat").forEach(e=>{
+    if(bound&&e.dataset.p!==bound.power){ e.classList.add("locked"); e.title="该座位由其他人操作"; return; }
+    e.onclick=()=>{seat=e.dataset.p;save();renderSeats(st);refresh();};
+  });
   const opts=POWERS.filter(([c])=>c!==seat).map(([c,n])=>`<option value="${c}">${n}</option>`).join("");
   $("#sendTo").innerHTML=opts+"<option value='GLOBAL'>GLOBAL（全体公开）</option>";
   $("#sendLimit").textContent=300;
@@ -263,38 +341,73 @@ async function refresh(){
   }
   try{
     const st=await api("/api/state");
+    lastState=st;
     renderSeats(st);
     $("#phase").textContent=st.game_over?("已结束 · "+(st.result_text||"")):st.phase;
+    setDeadline(st);
     const b=await api("/api/brief");
     $("#brief").innerHTML=renderBrief(b.text);
     if(st.game_over){
       $("#banner").classList.remove("hidden");
-      $("#banner").textContent="对局已结束："+(st.result_text||"")+"　点右上「新局」重开。";
+      $("#banner").textContent="对局已结束："+(st.result_text||"")
+        + (bound?"":"　点右上「新局」重开。");
+      deadlineAt=0; $("#deadline").classList.add("hidden");
     }
     lastErr="";
   }catch(e){
-    $("#phase").textContent="连接失败";
-    if(e.message!==lastErr){ toast(e.message,"err"); lastErr=e.message; }
+    const noMatch=String(e.message||"").includes("还没有开局");
+    $("#phase").textContent=noMatch?"等待房主开局":"连接失败";
+    if(noMatch){
+      $("#brief").innerHTML='<div class="ln h2">对局还没开始</div><div class="ln">等房主开局后刷新本页即可。</div>';
+      renderSeats(null);
+    }else if(e.message!==lastErr){ toast(e.message,"err"); lastErr=e.message; }
   }
 }
 
+function fmtLeft(sec){
+  const m=Math.floor(sec/60), s=String(sec%60).padStart(2,"0");
+  return m+":"+s;
+}
+
+function setDeadline(st){
+  const s=st.deadline_left, el=$("#deadline");
+  if(s===null||s===undefined){ deadlineAt=0; el.classList.add("hidden"); return; }
+  deadlineAt=Date.now()+s*1000;
+  el.classList.remove("hidden");
+  el.textContent="剩余 "+fmtLeft(Math.max(0,Math.round(s)));
+}
+
+// 本地每秒走一格，不然 5 秒轮询下倒计时会一跳一跳
+setInterval(()=>{
+  if(!deadlineAt) return;
+  const left=Math.max(0,Math.round((deadlineAt-Date.now())/1000));
+  const el=$("#deadline");
+  el.textContent="剩余 "+fmtLeft(left);
+  el.classList.toggle("warn",left<=30);
+},1000);
+
 async function boot(){
   load();
+  pickBound();
   try{
     const h=await api("/healthz");
-    renderWarn(h);
-    if(h.admin_required) showAdmin(false);
-    const d=await api("/api/match",{method:"POST"});
-    tokens=d.tokens;
-    if(!tokens[seat]) seat="ITALY";
-    save();
-    renderSeats(d.summary);
-    $("#adminKey").classList.remove("bad");
-    await loadLlm();
+    if(!bound){
+      // 绑定座位的玩家不建局、不取令牌：他手里那一个就够了
+      renderWarn(h);
+      if(h.admin_required) showAdmin(false);
+      const d=await api("/api/match",{method:"POST"});
+      tokens=d.tokens;
+      if(!tokens[seat]) seat="ITALY";
+      save();
+      renderSeats(d.summary);
+      $("#adminKey").classList.remove("bad");
+      await loadLlm();
+    }
     await refresh();
   }catch(e){
     const needKey=String(e.message||"").includes("管理员密钥");
-    toast(needKey ? "需要管理密钥：请在右上角输入后按回车" : "建局失败："+e.message,"err");
+    toast(needKey ? "需要管理密钥：请在右上角输入后按回车"
+        : (bound ? "连不上服务："+e.message : "建局失败："+e.message),"err");
     $("#phase").textContent=needKey?"等待管理密钥":"连接失败";
     $("#brief").innerHTML='<div class="ln h2">尚未开局</div><div class="ln">'
       + (needKey
@@ -370,9 +483,11 @@ function renderLlm(d){
   $("#llmSeats").innerHTML=POWERS.map(([c,n,k])=>{
     const s=seats[c], u=(s&&s.usage)||{};
     const right=s
-      ? `${u.calls||0} 次 · ${s.tokens||0} tok · ¥${(u.cost_cny||0).toFixed(3)}`
+      ? (s.busy?"思考中 · ":"")
+        + `${u.calls||0} 次 · ${s.tokens||0} tok · ¥${(u.cost_cny||0).toFixed(3)}`
         + (u.fallbacks?` · 降级 ${u.fallbacks}`:"")
         + (s.enabled?"":` · ${esc(s.stop_reason||"已停用")}`)
+        + (s.last_error?`<i class="llmerr" title="${esc(s.last_error)}">⚠</i>`:"")
       : "人类操作";
     return `<div class="seat" data-p="${c}">
       <input type="checkbox" data-p="${c}" ${s?"checked":""}>
@@ -422,6 +537,43 @@ $("#btnCtx").onclick=async()=>{
 };
 
 $("#btnRefresh").onclick=()=>{refresh();toast("已刷新");};
+
+// ---------- 管理页签：分发座位 / 暂停 / 强制结算 ----------
+$("#btnLinks").onclick=async()=>{
+  try{
+    const d=await api("/api/links",{method:"POST"});
+    if(d.notice) toast(d.notice,"err");
+    $("#linksOut").innerHTML=POWERS.map(([c,n])=>
+      `<div class="linkrow"><span class="nm">${n}</span>`
+      + `<code>${esc(d.links[c])}</code>`
+      + `<button data-power="${c}">复制</button></div>`).join("");
+    $("#linksOut").querySelectorAll("button[data-power]").forEach(b=>{
+      b.onclick=async()=>{
+        const url=d.links[b.dataset.power];
+        try{ await navigator.clipboard.writeText(url); toast(NAME[b.dataset.power]+" 的链接已复制","ok"); }
+        catch(e){ toast("浏览器不允许写剪贴板，请手动选中复制","err"); }
+      };
+    });
+  }catch(e){ toast(e.message,"err"); }
+};
+
+$("#btnPause").onclick=async()=>{
+  const action=lastState&&lastState.paused?"resume":"pause";
+  try{
+    await api("/api/admin/control",{method:"POST",body:JSON.stringify({action})});
+    toast(action==="pause"?"已暂停：阶段时钟停走，交令也暂停结算":"已继续","ok");
+    await refresh();
+  }catch(e){ toast(e.message,"err"); }
+};
+
+$("#btnForce").onclick=async()=>{
+  if(!confirm("把还没交令的国家按驻守处理，并立即推进到下一阶段？")) return;
+  try{
+    const d=await api("/api/admin/settle",{method:"POST"});
+    toast(d.settled?"已强制结算，进入下一阶段":"没能推进（可能对局已结束或处于暂停）",d.settled?"ok":"err");
+    await refresh(); if(!bound) await loadLlm();
+  }catch(e){ toast(e.message,"err"); }
+};
 
 $("#btnNew").onclick=async()=>{
   if(!confirm("清空当前对局并开新局？旧存档会在服务器上备份一份。")) return;

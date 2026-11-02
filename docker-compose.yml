@@ -14,4 +14,10 @@ services:
       LOG_LEVEL: info
       # 本机自己玩可留空；对外访问务必设置（未设置时建局接口会吐出全部座位令牌）
       ADMIN_KEY: ${ADMIN_KEY:-}
+      # 每阶段限时（秒）。0 = 不限时，适合一个人慢慢想；多人真打建议 300。
+      PHASE_SECONDS: ${PHASE_SECONDS:-0}
+      # 接模型时填任意 OpenAI 兼容端点，其余可留空
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
     restart: unless-stopped

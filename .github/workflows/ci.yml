@@ -103,6 +103,9 @@ jobs:
           echo "--- 带密钥应 200 且 7 个令牌 ---"
           curl -fsS -X POST http://127.0.0.1:8082/api/match -H 'X-Admin-Key: smoke' \
             | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['tokens'])==7, d; print('gated match ok')"
+          echo "--- 座位链接应一国一条，令牌与国家对得上 ---"
+          curl -fsS -X POST http://127.0.0.1:8082/api/links -H 'X-Admin-Key: smoke' \
+            | python -c "import json,sys; from urllib.parse import urlparse,parse_qs; d=json.load(sys.stdin)['links']; assert len(d)==7, d; assert all(parse_qs(urlparse(u).query)['seat']==[p] for p,u in d.items()), d; print('links ok')"
       - name: 失败时打印管理密钥日志
         if: failure()
         run: docker logs dw-adm || true
@@ -122,9 +125,21 @@ jobs:
           curl -fsS -X POST http://127.0.0.1:8083/api/llm/seat \
             -H 'Content-Type: application/json' -d '{"power":"ITALY","enabled":true}' \
             | python -c "import json,sys; d=json.load(sys.stdin); assert d['enabled'] is True, d; print('seat on ok')"
-          echo "--- 推一轮，模型应自己交出合法命令 ---"
-          curl -fsS -X POST http://127.0.0.1:8083/api/llm/tick \
-            | python -c "import json,sys; d=json.load(sys.stdin); r=[x for x in d['results'] if not x.get('skipped')]; assert r and r[0]['ok'], d; print('tick ok')"
+          # 关键在「不手动驱动」：以前这里调 /api/llm/tick，绕开了后台线程，
+          # 结果镜像里线程根本没启动（启动写在 main() 里，而镜像是 uvicorn app.main:app）都没被发现。
+          echo "--- 不手动 tick，等后台线程自己交令（最多 25 秒）---"
+          ready=False
+          for i in $(seq 1 25); do
+            ready=$(curl -fsS http://127.0.0.1:8083/api/state \
+              | python -c "import json,sys; print(json.load(sys.stdin)['players']['ITALY']['ready'])")
+            if [ "$ready" = "True" ]; then break; fi
+            sleep 1
+          done
+          echo "ITALY ready=$ready"
+          test "$ready" = "True" && echo "seat acted by background loop"
+          echo "--- 这一手应当真花过 token，且不是故障兜底 ---"
+          curl -fsS http://127.0.0.1:8083/api/llm \
+            | python -c "import json,sys; u=json.load(sys.stdin)['seats']['ITALY']['usage']; assert u['calls']>=1, u; assert u['fallbacks']==0, u; print('usage ok', u)"
           echo "--- 上下文窗口有内容 ---"
           curl -fsS 'http://127.0.0.1:8083/api/llm/context?power=ITALY' \
             | python -c "import json,sys; d=json.load(sys.stdin); assert d['text'] and d['stats']['chars']>0, d; print('context ok', d['stats'])"
@@ -134,3 +149,33 @@ jobs:
       - name: 清理模型座位容器
         if: always()
         run: docker rm -f dw-llm || true
+
+      # 阶段时钟：没人交令时它必须自己把局面推下去。
+      # 这是「一个人挂机不会冻住全桌」唯一的端到端证明——单测只能证明函数逻辑，证不了线程真的在跑。
+      - name: 阶段时钟冒烟
+        run: |
+          docker run -d --name dw-clock -p 8084:8080 -e PHASE_SECONDS=2 diplomacy-web:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8084/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS -X POST http://127.0.0.1:8084/api/match > /dev/null
+          echo "--- 开局应当有倒计时 ---"
+          curl -fsS http://127.0.0.1:8084/api/state \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['phase']=='S1901M' and d['deadline_left'] is not None, d; print('deadline ok')"
+          echo "--- 一个人都不交令，等它自己结算（最多 60 秒）---"
+          phase=S1901M
+          for i in $(seq 1 60); do
+            phase=$(curl -fsS http://127.0.0.1:8084/api/state \
+              | python -c "import json,sys; print(json.load(sys.stdin)['phase'])")
+            if [ "$phase" != "S1901M" ]; then break; fi
+            sleep 1
+          done
+          echo "phase=$phase"
+          test "$phase" != "S1901M" && echo "clock settled ok"
+      - name: 失败时打印阶段时钟日志
+        if: failure()
+        run: docker logs dw-clock || true
+      - name: 清理阶段时钟容器
+        if: always()
+        run: docker rm -f dw-clock || true

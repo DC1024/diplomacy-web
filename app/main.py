@@ -11,20 +11,24 @@ import hmac
 import logging
 import os
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .clock import PhaseClock
 from .engine.arena import POWERS, Arena, OrderError
 from .llm import LLMSeat, SeatRunner, Usage, from_env
 from .llm import build as build_context
+from .llm.orders import hold_orders
 
-# 版本由构建期注入（Dockerfile 的 APP_VERSION 来自 git tag），避免镜像标签与 /healthz 漂移
-VERSION = os.environ.get("APP_VERSION", "0.1.0")
+# 版本由构建期注入（Dockerfile 的 APP_VERSION 来自 git tag），避免镜像标签与 /healthz 漂移。
+# 本地直接跑时没有注入，别硬编码一个具体版本——那会让 /healthz 说谎，用 dev 占位最诚实。
+VERSION = os.environ.get("APP_VERSION", "0.0.0-dev")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 STATE_PATH = DATA_DIR / "state.json"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -58,6 +62,9 @@ PRICE_IN = float(os.environ.get("LLM_PRICE_IN", "2"))    # ¥ / 百万 input tok
 PRICE_OUT = float(os.environ.get("LLM_PRICE_OUT", "8"))  # ¥ / 百万 output token
 KEEP_HIST = int(os.environ.get("LLM_KEEP_HIST", "3"))
 KEEP_MSGS = int(os.environ.get("LLM_KEEP_MSGS", "30"))
+
+# 阶段时钟：0 = 关闭。多人对局建议 300～900 秒；热座一个人操作七国时开着只会添乱。
+PHASE_SECONDS = float(os.environ.get("PHASE_SECONDS", "0"))
 
 
 def arena() -> Arena | None:
@@ -95,6 +102,7 @@ def require_admin(key: str | None) -> None:
 def summary(a: Arena) -> dict:
     st = a.admin_state()
     game = a.game()
+    running = not (st["game_over"] or st["paused"])
     return dict(
         version=VERSION,
         match_id=st["match_id"],
@@ -107,6 +115,8 @@ def summary(a: Arena) -> dict:
         units={p: len(game.get_units(p)) for p in POWERS},
         players={p: dict(active=s["active"], required=s["required"], ready=s["ready"])
                  for p, s in st["players"].items()},
+        phase_seconds=PHASE_SECONDS,
+        deadline_left=_clock.note(st["match_id"], st["phase"], running=running),
     )
 
 
@@ -123,7 +133,75 @@ def try_settle(a: Arena) -> bool:
     return False
 
 
-app = FastAPI(title="七国纵横 · Diplomacy Web", version=VERSION, docs_url="/api/docs", openapi_url="/api/openapi.json")
+def timeout_hold(a: Arena, st: dict) -> bool:
+    """阶段到点：把还没交令的活跃座位按驻守处理，再尝试结算。
+
+    三种人不碰：
+    - 座位正跟模型说话（`busy`）：它自己最长 60s 就有结论，抢在前面交只会白花一次 token；
+    - 座位还没轮到（后台 2s 轮询还没尝试过）：再等一轮，别把这一回合替它废掉；
+    - 座位已经试过却没交令、也没在忙：那是后台兜底也失败了，这里必须接管——
+      否则这一家永远不交令，结算永远不成立，管理员点「强制结算」也推不动。
+    """
+    held = []
+    with a.lock:
+        for power, info in st["players"].items():
+            if not info["required"] or info["ready"]:
+                continue
+            seat = _seats.get(power)
+            if seat is not None and seat.enabled:
+                if seat.busy or not _runner.attempted(st["revision"], power):
+                    continue
+            orders = hold_orders(a.game(), power)
+            try:
+                a.act(power, {"action": "orders", "orders": orders,
+                              "request_id": f"clock-{st['revision']}-{power}"})
+                held.append(power)
+            except Exception as exc:  # 一个国家托管失败不该拖死其余六国
+                log.warning("超时托管 %s 失败：%s", power, exc)
+        settled = try_settle(a)
+    if held or settled:
+        log.info("阶段 %s 超时：托管 %s，结算=%s",
+                 st["phase"], ",".join(held) or "无", settled)
+    return settled
+
+
+_clock = PhaseClock(lambda: _arena, timeout_hold, seconds=PHASE_SECONDS)
+
+
+def warn_if_unprotected() -> None:
+    """没设管理密钥时按「监听范围」分级告警：对外是事故，本机只是提醒。"""
+    if ADMIN_KEY:
+        return
+    msg = ("未设置 ADMIN_KEY：/api/match 会把 7 个座位令牌发给任何访问者"
+           "（等于公开全部私信），任何人也能清档。")
+    if bound_off_loopback():
+        log.critical("%s 当前监听 %s，本机之外也能连上——页面上会挂红色告警。"
+                     "对外部署请设 ADMIN_KEY=<长随机串>；只在本机玩请设 HOST=127.0.0.1。",
+                     msg, HOST)
+    else:
+        log.warning("%s 仅监听 %s，只有本机能连，暂不构成风险。", msg, HOST)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """后台线程挂在 ASGI 生命周期上，而不是 `main()` 里。
+
+    踩过的坑：线程原本只在 `main()`（`python -m app.main`）里启动，而 Dockerfile 用
+    `uvicorn app.main:app` —— `main()` 压根不执行，于是**镜像里的模型座位与阶段时钟
+    从来没跑起来过**。测试全绿是因为它们自己手动调 `/api/llm/tick`，绕开了后台线程。
+    """
+    warn_if_unprotected()
+    _runner.start()
+    _clock.start()
+    try:
+        yield
+    finally:
+        _clock.stop()
+        _runner.stop()
+
+
+app = FastAPI(title="七国纵横 · Diplomacy Web", version=VERSION, lifespan=lifespan,
+              docs_url="/api/docs", openapi_url="/api/openapi.json")
 
 
 class SendReq(BaseModel):
@@ -137,6 +215,10 @@ class OrdersReq(BaseModel):
 
 class DrawReq(BaseModel):
     vote: bool = True
+
+
+class ControlReq(BaseModel):
+    action: str = Field(..., description="pause 或 resume")
 
 
 class ResetReq(BaseModel):
@@ -170,6 +252,23 @@ def new_match(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
                     tokens=a.data["tokens"], summary=summary(a))
 
 
+@app.post("/api/links")
+def make_links(request: Request, x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """生成 7 条「只绑定一个座位」的链接，一人一条发下去。
+
+    链接里带着该国令牌，谁拿到就等于拿到该国的私信和交令权——按座位单独发，别群发。
+    拿到链接的页面只看得到自己那一国的令牌，切不了国家，也看不到别国的信。
+    """
+    require_admin(x_admin_key)
+    a = require_arena()
+    base = str(request.base_url).rstrip("/")
+    return dict(
+        links={p: f"{base}/?seat={p}&t={a.data['tokens'][p]}" for p in POWERS},
+        notice=None if ADMIN_KEY else
+        "当前没设 ADMIN_KEY：任何人都能调 /api/match 拿到全部令牌，发链接没有保密意义",
+    )
+
+
 @app.post("/api/reset")
 def reset(req: ResetReq, x_admin_key: Annotated[str | None, Header()] = None) -> dict:
     """开新局。必须显式确认，避免误清存档。"""
@@ -186,6 +285,7 @@ def reset(req: ResetReq, x_admin_key: Annotated[str | None, Header()] = None) ->
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         _arena = Arena.create(STATE_PATH)
         _runner.reset()
+        _clock.reset()
         # 新局重置预算与用量，但保留哪些座位由模型操作
         for llm_seat in _seats.values():
             llm_seat.usage = Usage()
@@ -284,6 +384,29 @@ def provider_or_400():
     return provider
 
 
+@app.post("/api/admin/control")
+def admin_control(req: ControlReq, x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """暂停/继续。暂停期间阶段时钟不走。"""
+    require_admin(x_admin_key)
+    a = require_arena()
+    if req.action not in ("pause", "resume"):
+        raise HTTPException(400, "action 只能是 pause 或 resume")
+    a.control(req.action)
+    a.save()
+    _clock.reset()
+    log.info("管理员 %s 对局 %s", req.action, a.data["match_id"])
+    return summary(a)
+
+
+@app.post("/api/admin/settle")
+def admin_settle(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """强制结算：未交令的国家按驻守处理，然后立即推进阶段。"""
+    require_admin(x_admin_key)
+    a = require_arena()
+    moved = timeout_hold(a, a.admin_state())
+    return dict(settled=moved, state=summary(a))
+
+
 @app.get("/api/llm")
 def llm_status() -> dict:
     """当前有哪些 LLM 座位、花了多少、上下文窗口多大。"""
@@ -366,16 +489,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 def main() -> None:
     import uvicorn
 
-    if not ADMIN_KEY:
-        msg = ("未设置 ADMIN_KEY：/api/match 会把 7 个座位令牌发给任何访问者"
-               "（等于公开全部私信），任何人也能清档。")
-        if bound_off_loopback():
-            log.critical("%s 当前监听 %s，本机之外也能连上——页面上会挂红色告警。"
-                         "对外部署请设 ADMIN_KEY=<长随机串>；只在本机玩请设 HOST=127.0.0.1。",
-                         msg, HOST)
-        else:
-            log.warning("%s 仅监听 %s，只有本机能连，暂不构成风险。", msg, HOST)
-    _runner.start()
+    # 线程与告警都在 lifespan 里，这里只管起服务——两条启动路径行为一致
     uvicorn.run(app, host=HOST,
                 port=int(os.environ.get("PORT", "8080")), workers=1, log_level="info")
 
