@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -24,6 +25,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import export as export_mod
 from .clock import PhaseClock
 from .engine.arena import POWERS, Arena, OrderError
 from .llm import LLMSeat, SeatRunner, Usage, probe, seatstore
@@ -631,6 +633,37 @@ def replay(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
             stage=stage,
             result_text=a.result_text() if stage == "done" else "",
         )
+
+
+@app.get("/api/export")
+def export_game(x_seat_token: Annotated[str | None, Header()] = None,
+                fmt: str = Query("md", alias="format", pattern="^(md|markdown|text|json)$"),
+                ) -> Response:
+    """把整局导出：文本战报（`format=md`）或 JSON（`format=json`）。
+
+    私信的边界只看**有没有座位令牌**：坐着的人拿到自己收发的那一份，其余人拿到一份
+    不含任何私信的公开战报——管理员也一样。v0.7.5 定的「管理是运维不是偷看」，
+    导出不该是它的例外；真要整档备份就拷 `data/state.json`。
+
+    令牌走请求头而不是查询串：下载链接会被贴进聊天、留在浏览器历史里，
+    令牌一旦进了 URL 就等于公开。所以前端是先带头发请求、再拿 Blob 落盘。
+    """
+    a = require_arena()
+    who = optional_seat(a, x_seat_token) or ""
+    with a.lock:
+        if fmt.lower() == "json":
+            body = json.dumps(export_mod.payload(a, who), ensure_ascii=False, indent=2)
+            media, ext = "application/json; charset=utf-8", "json"
+        else:
+            body = export_mod.markdown(a, who)
+            media, ext = "text/markdown; charset=utf-8", "md"
+        phase = a.game().get_current_phase()
+        match_id = a.data["match_id"]
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", f"{match_id}-{phase}")
+    stem = re.sub(r"-{2,}", "-", stem).strip("-")   # match_id 本身可能以 `-` 结尾，别落成 `--`
+    return Response(body, media_type=media, headers={
+        "content-disposition": f'attachment; filename="diplomacy-{stem}.{ext}"',
+    })
 
 
 @app.post("/api/send")

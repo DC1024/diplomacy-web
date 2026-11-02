@@ -326,6 +326,8 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
       <div class="rrow">
         <div><label>阶段</label><select id="replayPick"></select></div>
         <button class="btn ghost" id="btnReplay">刷新复盘</button>
+        <button class="btn ghost" id="btnExportMd" title="整局战报（Markdown），含你收发的信件">导出战报</button>
+        <button class="btn ghost" id="btnExportJson" title="同一份事实的 JSON，给脚本或存档用">导出 JSON</button>
       </div>
       <div class="hint" id="replayMeta">选一个阶段，回看当轮结算与你自己参与的私信。</div>
       <pre class="out hidden" id="replayOut"></pre>
@@ -1023,6 +1025,42 @@ async function loadReplay(){
 
 $("#replayPick").onchange=e=>showReplayPhase(e.target.value);
 $("#btnReplay").onclick=()=>loadReplay();
+
+// ---------- 导出 ----------
+// 令牌走请求头，不拼进 <a href>：下载链接会留在浏览器的下载记录与历史里，
+// 座位链接最容易被二次传播的就是这些地方。所以先带头发请求，拿到 Blob 再落盘。
+// 观众也能导出——拿到的是公开版（一封私信都没有），这和服务端那条边界是同一件事。
+async function exportGame(fmt){
+  const btn=$(fmt==="json"?"#btnExportJson":"#btnExportMd");
+  btn.disabled=true;
+  const h={};
+  if(tokens[seat]) h["X-Seat-Token"]=tokens[seat];
+  try{
+    const res=await fetch("/api/export?format="+fmt,{headers:h});
+    if(!res.ok){
+      let msg="HTTP "+res.status;
+      try{ msg=(await res.json()).detail||msg; }catch(e){ /* 不是 JSON 就用状态码 */ }
+      throw new Error(msg);
+    }
+    const blob=await res.blob();
+    // match_id 可能以 `-` 结尾（token_urlsafe 的结果），拼上去会落成 `...--W1903A`
+    const mid=((lastState&&lastState.match_id)||"game").replace(/-+$/,"");
+    const stem="diplomacy-"+mid+"-"+((lastState&&lastState.phase)||"now");
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;
+    a.download=stem+"."+fmt;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // 立刻 revoke 在部分浏览器上会让下载拿到空文件，隔一秒再回收
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+    toast(fmt==="json"?"已导出 JSON":"已导出战报","ok");
+  }catch(e){ toast(e.message,"err"); }
+  finally{ btn.disabled=false; }
+}
+$("#btnExportMd").onclick=()=>exportGame("md");
+$("#btnExportJson").onclick=()=>exportGame("json");
 
 // ---------- 地图页签 ----------
 // 几何只拉一次（服务端从引擎自带 SVG 解析，整局不变）；局面每次进页签、每次推送都重拉——
