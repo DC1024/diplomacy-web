@@ -77,9 +77,10 @@ def provider(**kw) -> OpenAICompatProvider:
 
 def test_default_cap_leaves_room_for_a_chain_of_thought():
     # 900 是踩坑时的值：思维链 1346 就把配额吃穿了。给个下限，别再悄悄调回去。
-    # 后来又按一局实测把下限从 4096 提到 8192：单次 completion_tokens 中位数就在
-    # 4300 上下，4096 恰好压在中位数上，等于一半的调用都要重发一次（慢一倍、两倍钱）。
-    assert OpenAICompatProvider.DEFAULT_MAX_TOKENS >= 8192
+    # 上限同理，但方向相反：8192 试过——同一模型 8 阶段 ¥2.8935 → ¥3.7449，
+    # 因为三成调用的思维链连 8192 都填不满，抬高配额只是把「白烧的那一次」抬贵。
+    # 所以这条只钉下限，别「顺手」往上调。
+    assert OpenAICompatProvider.DEFAULT_MAX_TOKENS >= 4096
     assert provider().max_tokens == OpenAICompatProvider.DEFAULT_MAX_TOKENS
 
 
@@ -128,14 +129,14 @@ def test_runaway_chain_of_thought_gets_told_to_stop_thinking(monkeypatch):
     193 token 交出完整答案，比继续加额度便宜二十倍。
     """
     seen = fake_gateway(monkeypatch, [
+        reply_body("", finish="length", reasoning=4096),
         reply_body("", finish="length", reasoning=8192),
-        reply_body("", finish="length", reasoning=16384),
         reply_body('{"pass": true}', reasoning=0, completion=193),
     ])
     seat = LLMSeat("AUSTRIA", provider(), budget_cny=20.0)
     reply = seat._chat("s", "u")
-    # 放宽（8192→16384）→ 放宽到头（16384 是天花板）→ 反而缩回 2000 劝它别想
-    assert caps(seen) == [8192, 16384, 2000]
+    # 放宽（4096→8192）→ 放宽到头（8192 是这一级的天花板）→ 反而缩回 2000 劝它别想
+    assert caps(seen) == [4096, 8192, 2000]
     assert "不要再推理" in last_user(seen)
     assert all("不要再推理" not in p["messages"][-1]["content"] for p in seen[:2])  # 前两次不加
     assert json.loads(reply.text) == {"pass": True}
