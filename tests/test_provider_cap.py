@@ -143,6 +143,24 @@ def test_empty_body_gets_talked_out_of_thinking_instead_of_widened(monkeypatch):
     assert seat.usage.calls == 2
 
 
+def test_the_nudge_caps_the_waste_instead_of_keeping_it(monkeypatch):
+    """劝的那一次要**比撞墙那次小**——这 2000 是给「劝了也白搭」设的天花板。
+
+    v0.7.8 试过反方向（只劝、配额不动），同条件 8 阶段：放宽次数 18 → 15，
+    但截断总数 43 → 47、每调用 token 4818 → 5733、总账 ¥2.16 → ¥2.78。
+    救回的那 3 条链抵不过 15 次多烧 2000。所以这条断言看着「反直觉」，其实是量出来的。
+    """
+    seen = fake_gateway(monkeypatch, [
+        reply_body("", finish="length", reasoning=3000),
+        reply_body('{"pass": true}', reasoning=0, completion=120),
+    ])
+    seat = LLMSeat("TURKEY", provider(max_tokens=3000), budget_cny=20.0)
+    seat._chat("s", "u")
+    first, nudged = caps(seen)
+    assert nudged < first, f"劝的那次没有收窄：{first} → {nudged}"
+    assert nudged == 2000
+
+
 def test_runaway_chain_of_thought_escalates_then_gives_up(monkeypatch):
     """劝不住就放宽到 8192 再给一次机会，还不行才认栽——每一步都计费。"""
     seen = fake_gateway(monkeypatch, [
