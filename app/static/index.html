@@ -16,6 +16,7 @@ header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:
 .brand{font-size:16px;font-weight:500;letter-spacing:.5px}
 .brand b{color:var(--accent)}
 .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:1px 6px}
+.tag.live{color:var(--ok);border-color:rgba(63,185,80,.45)}
 .phase{margin-left:auto;font-size:13px;color:var(--accent);font-variant-numeric:tabular-nums}
 header button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 11px;font-size:13px;cursor:pointer}
 header button:hover{border-color:var(--muted)}
@@ -92,6 +93,7 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
 <header>
   <div class="brand">七国<b>纵横</b></div>
   <span class="tag">B1 · 热座+模型</span>
+  <span class="tag" id="live" title="更新方式">轮询</span>
   <div class="phase" id="phase">读取中…</div>
   <span class="clock hidden" id="deadline"></span>
   <span id="boundTag" class="hidden"></span>
@@ -198,6 +200,7 @@ const POWERS=[["AUSTRIA","奥地利","a"],["ENGLAND","英国","e"],["FRANCE","�
 const NAME=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
 const KEY="dw.prefs.v1", BOUND="dw.bound.v1";
 let tokens={}, seat="ITALY", timer=null, busy=false, adminKey="";
+let es=null, pushT=null, sseOk=false;
 let bound=null, lastState=null, deadlineAt=0;
 
 const $=s=>document.querySelector(s);
@@ -331,6 +334,12 @@ function renderWarn(h){
 $("#warnMini").onclick=e=>{e.stopPropagation();localStorage.setItem(WARNMINI,"1");$("#warn").classList.add("mini");};
 $("#warnBrief").onclick=()=>{localStorage.removeItem(WARNMINI);$("#warn").classList.remove("mini");};
 
+// 页头那行状态：结束/暂停要说出来，不然玩家只看到倒计时没了，不知道是被冻住还是在等
+function phaseText(st){
+  if(st.game_over) return "已结束 · "+(st.result_text||"");
+  return st.paused ? st.phase+" · 已暂停" : st.phase;
+}
+
 async function refresh(){
   if(busy) return;
   if(!tokens[seat]){
@@ -343,7 +352,7 @@ async function refresh(){
     const st=await api("/api/state");
     lastState=st;
     renderSeats(st);
-    $("#phase").textContent=st.game_over?("已结束 · "+(st.result_text||"")):st.phase;
+    $("#phase").textContent=phaseText(st);
     setDeadline(st);
     const b=await api("/api/brief");
     $("#brief").innerHTML=renderBrief(b.text);
@@ -362,6 +371,43 @@ async function refresh(){
       renderSeats(null);
     }else if(e.message!==lastErr){ toast(e.message,"err"); lastErr=e.message; }
   }
+}
+
+// 实时推送：结算、暂停、有人交令都会立刻到，不用等下一轮轮询。
+// 推送只带公开状态（不含任何座位令牌），所以连上之后仍要按座位去拉简报。
+function setLive(on){
+  sseOk=on;
+  const el=$("#live");
+  el.className="tag"+(on?" live":"");
+  el.textContent=on?"实时":"轮询";
+  el.title=on?"已连上推送：局面一变就刷新":"推送不可用，退回 5 秒轮询";
+  // 连上就放宽兜底轮询（漏帧时仍能自愈），断开立刻回到 5 秒
+  clearInterval(timer);
+  timer=setInterval(refresh,on?30000:5000);
+}
+
+function onPush(st){
+  if(!st) return;
+  lastState=st;
+  $("#phase").textContent=phaseText(st);
+  setDeadline(st);
+  renderSeats(st);
+  // 简报/收件箱要带令牌，另取一次；合并 150ms 内的连续推送，免得一轮结算打十次请求
+  clearTimeout(pushT);
+  pushT=setTimeout(()=>{ if(!busy) refresh(); },150);
+}
+
+function openStream(){
+  if(!window.EventSource) return;
+  if(es) es.close();
+  es=new EventSource("/api/events");
+  es.addEventListener("state",e=>{
+    let d={}; try{d=JSON.parse(e.data)}catch(err){ return; }
+    onPush(d);
+  });
+  es.onopen=()=>setLive(true);
+  // 断线由 EventSource 自己重连；这里只负责退档，别让它以为自己还实时着
+  es.onerror=()=>setLive(false);
 }
 
 function fmtLeft(sec){
@@ -417,6 +463,7 @@ async function boot(){
     renderSeats(null);
   }
   clearInterval(timer); timer=setInterval(refresh,5000);
+  openStream();
 }
 
 document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{

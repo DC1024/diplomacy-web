@@ -8,15 +8,17 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -100,13 +102,14 @@ def require_admin(key: str | None) -> None:
         raise HTTPException(403, "需要管理员密钥：请在页面右上角填写，或传 X-Admin-Key 请求头")
 
 
-def summary(a: Arena) -> dict:
-    st = a.admin_state()
+def summary(a: Arena, st: dict | None = None) -> dict:
+    st = st if st is not None else a.admin_state()
     game = a.game()
     running = not (st["game_over"] or st["paused"])
     return dict(
         version=VERSION,
         match_id=st["match_id"],
+        revision=st["revision"],
         phase=st["phase"],
         paused=st["paused"],
         game_over=st["game_over"],
@@ -303,6 +306,80 @@ def a_ts() -> str:
 @app.get("/api/state")
 def get_state() -> dict:
     return summary(require_arena())
+
+
+# 等待切片：`admin_wait()` 被 `bump()` 唤醒是**立刻**的，切片只决定两件闲事——
+# ① 客户端断开后这条线程多久能退出（线程要等当前这次 wait 返回才会看到连接没了）；
+# ② 管理员换局这类「换了 Arena 对象」的事件最迟多久被发现。取 0.5 秒：
+#    代价只是每条连接每秒醒两次，换来关标签页后不留半分钟的僵尸线程。
+SSE_SLICE = 0.5
+# 空转多少个切片补一行注释心跳（约 16 秒），免得中间设备把安静当断线。
+SSE_PING_EVERY = 32
+
+
+def _sse(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _event_frames():
+    """SSE 帧流：局面一动就推一份公开快照。
+
+    刻意只推 `summary()`——里面没有任何座位令牌。客户端拿它当「该刷新了」的信号，
+    简报与私信仍旧走带令牌的 `/api/brief`、`/api/inbox`：推送通道本身不必鉴权，
+    也就不会因为一条连接被别人看到而漏掉别国私信。
+
+    等待用内核自带的 `admin_wait()`（Condition + 超时），不是忙轮询：结算完
+    `bump()` 会 `notify_all()`，下一次 wait 立刻带着新 revision 返回，所以切片长短
+    不影响推送延迟。代价是每条连接占一个线程池线程——单局七人够用，真要上百人
+    围观就得换成单一广播器，这条记在 TODO 的已知缺口里。
+    """
+    last_rev, last_match, idle = None, None, 0
+    while True:
+        a = arena()
+        if a is None:
+            # 还没开局：隔一会儿再看，别空转刷日志
+            yield _sse("idle", dict(match_id=None))
+            time.sleep(1.0)
+            continue
+        try:
+            st = a.admin_wait(-1 if last_rev is None else last_rev, SSE_SLICE)
+        except Exception:  # 读档 / 换局瞬间可能暂时不可用，下一轮重试
+            yield _sse("idle", dict(match_id=None))
+            time.sleep(1.0)
+            continue
+        if st["revision"] == last_rev and st["match_id"] == last_match:
+            idle += 1
+            if idle % SSE_PING_EVERY == 0:
+                yield ": ping\n\n"  # 局面没动，但别让连接显得死了
+            else:
+                # 空块：客户端一个字节都收不到，但生成器会从 next() 返回，
+                # 于是「连接已断、这条线程被放弃」能立刻被发现。少了这一步，
+                # 关标签页 / TestClient 关闭时要等到下一次心跳（16 秒）才回收线程。
+                yield ""
+            continue
+        idle = 0
+        last_rev, last_match = st["revision"], st["match_id"]
+        try:
+            payload = summary(a, st)
+        except Exception:  # 一场正在收敛的结算不该把连接打断
+            log.exception("推送组装失败，跳过这一帧")
+            continue
+        yield _sse("state", payload)
+
+
+@app.get("/api/events")
+def events() -> StreamingResponse:
+    """实时推送（SSE）：结算、暂停、有人交令都会立刻下发，不用等下一轮轮询。"""
+    return StreamingResponse(
+        _event_frames(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # 反代（nginx/宝塔）默认会缓冲响应体：不声明这一行，推送会变成攒批下发
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/me")

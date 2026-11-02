@@ -106,6 +106,11 @@ jobs:
           echo "--- 座位链接应一国一条，令牌与国家对得上 ---"
           curl -fsS -X POST http://127.0.0.1:8082/api/links -H 'X-Admin-Key: smoke' \
             | python -c "import json,sys; from urllib.parse import urlparse,parse_qs; d=json.load(sys.stdin)['links']; assert len(d)==7, d; assert all(parse_qs(urlparse(u).query)['seat']==[p] for p,u in d.items()), d; print('links ok')"
+          echo "--- SSE 应立刻给出快照，且一个令牌都不能带 ---"
+          # --max-time 会以 28 退出，取到前几帧就够了；关键看是否「连上就给」以及有没有漏令牌
+          curl -sN --max-time 5 http://127.0.0.1:8082/api/events > /tmp/sse.txt || true
+          head -4 /tmp/sse.txt
+          python -c "import sys; raw=open('/tmp/sse.txt',encoding='utf-8').read(); assert 'event: state' in raw, '没收到 state 帧：'+raw[:200]; assert 'token' not in raw.lower(), '推送里混进了座位令牌'; print('sse ok')"
       - name: 失败时打印管理密钥日志
         if: failure()
         run: docker logs dw-adm || true
