@@ -4,11 +4,50 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>七国纵横 · 外交</title>
+<script>
+// 主题要在第一帧之前定下来，否则夜间用户会先看到一片白闪一下。
+// 没主动选过就跟着系统走；选过就以本地记录为准（换主题不该影响对局状态，所以单独一个键）。
+(function(){
+  try{
+    var t=localStorage.getItem("dw_theme");
+    if(t!=="light"&&t!=="dark"){
+      t=(window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";
+    }
+    document.documentElement.dataset.theme=t;
+  }catch(e){ document.documentElement.dataset.theme="dark"; }
+})();
+</script>
 <style>
 :root{
   --bg:#0f141c; --panel:#18202c; --panel2:#1e2836; --line:#2a3545;
   --text:#e6ebf2; --muted:#8d9aab; --accent:#e0b44c; --bad:#e5484d; --ok:#3fb950;
   --a:#e06c75; --e:#61afef; --f:#56b6c2; --g:#8d9aab; --i:#98c379; --r:#c678dd; --t:#e5c07b;
+  /* 强调色分两种用法：--accent 是「放在底上的文字/描边」，--accent-bg 是「当底色」的按钮。
+     日间前者要压深才够对比，后者保持金色才不至于糊成一块褐。 */
+  --accent-bg:#e0b44c; --on-accent:#1a1206;
+  --accent-soft:rgba(224,180,76,.14); --accent-line:rgba(224,180,76,.5);
+  --h2:#b9c6d6; --notice:#e0a33e;
+  --banner-bg:#2a1f14; --banner-line:#4a3a1c;
+  --warn-bg:#3a1114; --warn-line:#7a2028; --warn-ink:#ffbcb4; --warn-strong:#ff8f80;
+  --warn-code:#ffd9d2; --warn-code-bg:#00000045; --warn-hover:#4a161a;
+  /* 地图：整张图是 SVG 内联填充，改主题必须重画，所以颜色也得集中在这几个变量上 */
+  --map-bg:#0b1017; --map-line:#33445a; --map-sel:#fff; --map-label:#93a4b8;
+  --map-sc:#c9d4e2; --map-sc-ink:#0b1017; --unit-ink:#0b1017;
+  --map-water:#16202c; --map-neutral:#1d2734; --map-neutral-sc:#2b3a4c;
+}
+/* 日间：不换配色体系，只把底和字翻过来，七国的颜色保持原样（座位圆点与地图是同一套色） */
+html[data-theme="light"]{
+  --bg:#f4f6f9; --panel:#ffffff; --panel2:#eef2f7; --line:#d7dfe9;
+  --text:#1a2230; --muted:#5c6a7a; --accent:#a86f08; --bad:#c22c30; --ok:#1f7a34;
+  --accent-bg:#e0b44c; --on-accent:#1a1206;
+  --accent-soft:rgba(168,111,8,.12); --accent-line:rgba(168,111,8,.45);
+  --h2:#3d4b5c; --notice:#9a5b00;
+  --banner-bg:#fdf3df; --banner-line:#e8cf9a;
+  --warn-bg:#fdeaea; --warn-line:#eeb3b3; --warn-ink:#7a2028; --warn-strong:#a01b24;
+  --warn-code:#7a2028; --warn-code-bg:#f8d9d9; --warn-hover:#f9dede;
+  --map-bg:#f7f9fc; --map-line:#b7c4d2; --map-sel:#1a2230; --map-label:#3f4d5c;
+  --map-sc:#3f4d5c; --map-sc-ink:#ffffff; --unit-ink:#0b1017;
+  --map-water:#dce7f3; --map-neutral:#eaf0f7; --map-neutral-sc:#d2deeb;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif;height:100vh;display:flex;flex-direction:column}
@@ -33,10 +72,10 @@ aside{width:200px;border-right:1px solid var(--line);padding:10px;overflow:auto;
 .seat .rd{font-size:10px;color:var(--ok)}
 .seat.dead{opacity:.4}
 .seat small{display:block;font-size:10px;color:var(--muted)}
-i.llmtag{font-style:normal;font-size:10px;color:#1a1206;background:var(--accent);border-radius:3px;padding:0 4px;margin-left:5px;vertical-align:1px}
+i.llmtag{font-style:normal;font-size:10px;color:var(--on-accent);background:var(--accent-bg);border-radius:3px;padding:0 4px;margin-left:5px;vertical-align:1px}
 #llmSeats .seat{border:1px solid var(--line);margin-bottom:6px;padding:8px}
 #llmSeats input[type=checkbox]{width:15px;flex:0 0 15px;accent-color:var(--accent)}
-.llmerr{font-style:normal;color:#e0a33e;margin-left:5px;cursor:help}
+.llmerr{font-style:normal;color:var(--notice);margin-left:5px;cursor:help}
 /* 模型配置块：默认折叠，没配好时自动展开——不然对着「未配置」两个字不知道去哪填 */
 details.cfg{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:0 12px;margin:10px 0 14px}
 details.cfg>summary{cursor:pointer;font-size:13px;padding:10px 0;list-style:none;display:flex;align-items:center;gap:8px}
@@ -60,7 +99,7 @@ section.panel{flex:1;display:flex;flex-direction:column;min-width:0}
 #brief{font:13px/1.75 ui-monospace,"Cascadia Code",Consolas,monospace;white-space:pre-wrap;word-break:break-word}
 .ln{min-height:1.2em}
 .ln.h1{color:var(--accent);font-weight:500;margin:6px 0 4px}
-.ln.h2{color:#b9c6d6;font-weight:500;margin:8px 0 2px}
+.ln.h2{color:var(--h2);font-weight:500;margin:8px 0 2px}
 .ln.sep{color:var(--muted);border-top:1px dashed var(--line);margin:8px 0;padding-top:6px}
 .ln.me{color:var(--ok)}
 label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
@@ -69,7 +108,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 textarea{resize:vertical;min-height:90px;font-family:ui-monospace,Consolas,monospace}
 .row{display:flex;gap:10px}
 .row>*{flex:1}
-.btn{background:var(--accent);color:#1a1206;border:none;border-radius:6px;padding:9px 16px;font-size:13px;font-weight:500;cursor:pointer;margin-top:12px}
+.btn{background:var(--accent-bg);color:var(--on-accent);border:none;border-radius:6px;padding:9px 16px;font-size:13px;font-weight:500;cursor:pointer;margin-top:12px}
 .btn:hover{filter:brightness(1.1)}
 .btn.ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
@@ -88,7 +127,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 .mapbar .hint{margin:0;flex:1;min-width:0}
 .mapbar .btn{margin:0;flex-shrink:0}
 .mapbody{flex:1;min-height:0;display:flex;gap:8px}
-.mapwrap{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;background:#0b1017;overflow:hidden}
+.mapwrap{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;background:var(--map-bg);overflow:hidden}
 .mapwrap svg{display:block;width:100%;height:100%}
 .mapside{width:250px;flex-shrink:0;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px}
 .mapside .hint{margin:0 0 8px}
@@ -97,45 +136,45 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 .chip:hover{border-color:var(--accent)}
 /* 按动作性质配色：要动地方的（含撤退）带金边，不动的（驻守/解散/建造）压暗 */
 .chip.hold,.chip.disband,.chip.build{color:var(--muted)}
-.chip.move,.chip.retreat{border-color:rgba(224,180,76,.5)}
-.chip.on{border-color:var(--accent);background:rgba(224,180,76,.14)}
+.chip.move,.chip.retreat{border-color:var(--accent-line)}
+.chip.on{border-color:var(--accent);background:var(--accent-soft)}
 
 /* 地图本体：尺寸按 viewBox 单位算（1878×1517 缩到约 660px 宽，字号 21 约合屏幕上 7px） */
-.area{stroke:#33445a;stroke-width:1.1;vector-effect:non-scaling-stroke}
+.area{stroke:var(--map-line);stroke-width:1.1;vector-effect:non-scaling-stroke}
 .area.mine{cursor:pointer}
 .area.dest{cursor:pointer;stroke:var(--accent);stroke-width:2.4}
-.area.sel{stroke:#fff;stroke-width:2.6}
+.area.sel{stroke:var(--map-sel);stroke-width:2.6}
 /* 地名描一层底色：压在有色省份上也能看清。字号比 jDip 原版小一档——
    全图缩到约 770px 宽时，26 号的「NWT/SWE」会糊成一团 */
-.alabel{font:600 21px/1 system-ui,sans-serif;fill:#93a4b8;pointer-events:none;text-anchor:middle;letter-spacing:.3px;
-  paint-order:stroke;stroke:#0b1017;stroke-width:3.5;stroke-linejoin:round}
+.alabel{font:600 21px/1 system-ui,sans-serif;fill:var(--map-label);pointer-events:none;text-anchor:middle;letter-spacing:.3px;
+  paint-order:stroke;stroke:var(--map-bg);stroke-width:3.5;stroke-linejoin:round}
 .unit{pointer-events:none}
-.unit circle{stroke:#0b1017;stroke-width:2.5}
-.unit text{font:700 23px/1 system-ui,sans-serif;fill:#0b1017;text-anchor:middle;dominant-baseline:central}
+.unit circle{stroke:var(--map-bg);stroke-width:2.5}
+.unit text{font:700 23px/1 system-ui,sans-serif;fill:var(--unit-ink);text-anchor:middle;dominant-baseline:central}
 .unit.ordered circle{stroke:var(--accent);stroke-width:4}
-.sc{pointer-events:none;fill:#c9d4e2;stroke:#0b1017;stroke-width:1}
+.sc{pointer-events:none;fill:var(--map-sc);stroke:var(--map-sc-ink);stroke-width:1}
 #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--accent);padding:10px 16px;border-radius:6px;font-size:13px;max-width:80vw;opacity:0;pointer-events:none;transition:opacity .2s;white-space:pre-wrap}
 #toast.show{opacity:1}
 #toast.err{border-left-color:var(--bad)}
 #toast.ok{border-left-color:var(--ok)}
-.banner{padding:10px 16px;background:#2a1f14;border-bottom:1px solid #4a3a1c;color:var(--accent);font-size:13px}
+.banner{padding:10px 16px;background:var(--banner-bg);border-bottom:1px solid var(--banner-line);color:var(--accent);font-size:13px}
 .clock{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 .clock.warn{color:var(--bad)}
-#boundTag{font-size:11px;color:#1a1206;background:var(--accent);border-radius:4px;padding:1px 7px}
+#boundTag{font-size:11px;color:var(--on-accent);background:var(--accent-bg);border-radius:4px;padding:1px 7px}
 .seat.locked{cursor:not-allowed;opacity:.55}
 .linkrow{display:flex;gap:8px;align-items:center;margin-top:7px;font-size:12px}
 .linkrow .nm{flex:0 0 54px;color:var(--muted)}
 .linkrow code{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:5px 8px;overflow:auto;white-space:nowrap;font-size:11px;font-family:ui-monospace,Consolas,monospace}
 .linkrow button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:5px;padding:4px 9px;font-size:12px;cursor:pointer;margin:0;white-space:nowrap}
 .linkrow button:hover{border-color:var(--muted)}
-#warn{background:#3a1114;border-bottom:1px solid #7a2028;color:#ffbcb4;font-size:13px;line-height:1.7}
+#warn{background:var(--warn-bg);border-bottom:1px solid var(--warn-line);color:var(--warn-ink);font-size:13px;line-height:1.7}
 #warn .wfull{display:flex;gap:14px;align-items:flex-start;padding:11px 16px}
 #warn .wbody{flex:1}
-#warn b{color:#ff8f80}
-#warn code{background:#00000045;border-radius:4px;padding:1px 5px;color:#ffd9d2;font-family:ui-monospace,Consolas,monospace;font-size:12px}
-#warn button{background:transparent;border:1px solid #7a2028;color:#ffbcb4;border-radius:5px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap;margin:0}
-#warn button:hover{background:#4a161a}
-#warn .wbrief{display:none;padding:6px 16px;cursor:pointer;color:#ff8f80}
+#warn b{color:var(--warn-strong)}
+#warn code{background:var(--warn-code-bg);border-radius:4px;padding:1px 5px;color:var(--warn-code);font-family:ui-monospace,Consolas,monospace;font-size:12px}
+#warn button{background:transparent;border:1px solid var(--warn-line);color:var(--warn-ink);border-radius:5px;padding:3px 10px;font-size:12px;cursor:pointer;white-space:nowrap;margin:0}
+#warn button:hover{background:var(--warn-hover)}
+#warn .wbrief{display:none;padding:6px 16px;cursor:pointer;color:var(--warn-strong)}
 #warn.mini .wfull{display:none}
 #warn.mini .wbrief{display:block}
 .hidden{display:none!important}
@@ -152,6 +191,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
   <span id="boundTag" class="hidden"></span>
   <button id="btnUnbind" class="hidden">退出绑定</button>
   <input id="adminKey" class="adm" type="password" placeholder="管理密钥" autocomplete="off" hidden>
+  <button id="btnTheme" title="切换日夜模式">☀ 日间</button>
   <button id="btnRefresh">刷新</button>
   <button id="btnNew">新局</button>
 </header>
@@ -750,12 +790,25 @@ const rankOrder=o=>["move","retreat"].includes(parseOrder(o).kind)?0
   :(["support","convoy"].includes(parseOrder(o).kind)?1:2);
 const orderChip=o=>parseOrder(o);
 
+// 地图底色走 CSS 变量（日间是浅蓝灰、夜间是墨蓝），所以每次切主题都要重画一遍 SVG。
+// 缓存一次计算样式，别在 76 个省份里各查一次 getComputedStyle。
+let mapPalette=null;
+function palette(){
+  if(mapPalette) return mapPalette;
+  const cs=getComputedStyle(document.documentElement);
+  const v=n=>cs.getPropertyValue(n).trim();
+  mapPalette={water:v("--map-water")||"#16202c",neutral:v("--map-neutral")||"#1d2734",
+              neutralSC:v("--map-neutral-sc")||"#2b3a4c"};
+  return mapPalette;
+}
+
 function fillOf(code){
   const own=centerOwner(code);
   if(own) return POWER_KEY[own];
   const a=geo.areas[code];
-  if(a.kind==="water") return "#16202c";
-  return a.sc?"#2b3a4c":"#1d2734";
+  const pal=palette();
+  if(a.kind==="water") return pal.water;
+  return a.sc?pal.neutralSC:pal.neutral;
 }
 
 function drawMap(){
@@ -1093,6 +1146,33 @@ $("#btnNew").onclick=async()=>{
     tokens=d.tokens; save(); toast("新局已开始","ok"); await refresh();
   }catch(e){ toast(e.message,"err"); }
 };
+
+// 日夜模式：系统偏好只在「没手动选过」时生效，点过一次就以本地记录为准。
+// 换主题不该动对局状态，所以单独一个 storage 键，不塞进 KEY 里那个 {tokens,seat,adminKey}。
+const THEME_KEY="dw_theme";
+function paintTheme(t){
+  document.documentElement.dataset.theme=t;
+  const b=$("#btnTheme");
+  if(b){
+    b.textContent=t==="light"?"☾ 夜间":"☀ 日间";
+    b.title=t==="light"?"现在是日间模式，点一下切到夜间":"现在是夜间模式，点一下切到日间";
+  }
+  // 地图填色是 SVG 内联属性（不是 CSS），换了底色必须重画一遍
+  mapPalette=null;
+  if(geo) drawMap();
+}
+$("#btnTheme").onclick=()=>{
+  const next=document.documentElement.dataset.theme==="light"?"dark":"light";
+  localStorage.setItem(THEME_KEY,next);
+  paintTheme(next);
+};
+paintTheme(document.documentElement.dataset.theme==="light"?"light":"dark");
+if(window.matchMedia){
+  const mq=window.matchMedia("(prefers-color-scheme: light)");
+  const onChange=e=>{ if(!localStorage.getItem(THEME_KEY)) paintTheme(e.matches?"light":"dark"); };
+  if(mq.addEventListener) mq.addEventListener("change",onChange);
+  else if(mq.addListener) mq.addListener(onChange);
+}
 
 boot();
 </script>
