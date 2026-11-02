@@ -67,6 +67,39 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 .rrow>div{flex:0 1 auto;min-width:0}
 .rrow select{min-width:260px;max-width:420px}
 .rrow .btn{margin-top:0}
+
+/* 地图页：整块占满，图不跟着内容滚；动作列表放右边一栏，别压在图上 */
+#pane-map.on{display:flex;flex-direction:column;gap:8px;overflow:hidden}
+.mapbar{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.mapbar .hint{margin:0;flex:1;min-width:0}
+.mapbar .btn{margin:0;flex-shrink:0}
+.mapbody{flex:1;min-height:0;display:flex;gap:8px}
+.mapwrap{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;background:#0b1017;overflow:hidden}
+.mapwrap svg{display:block;width:100%;height:100%}
+.mapside{width:250px;flex-shrink:0;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px}
+.mapside .hint{margin:0 0 8px}
+.chiprow{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font-size:12px;padding:4px 9px;border-radius:20px;border:1px solid var(--line);background:var(--panel2);color:var(--text);cursor:pointer;white-space:nowrap}
+.chip:hover{border-color:var(--accent)}
+/* 按动作性质配色：要动地方的（含撤退）带金边，不动的（驻守/解散/建造）压暗 */
+.chip.hold,.chip.disband,.chip.build{color:var(--muted)}
+.chip.move,.chip.retreat{border-color:rgba(224,180,76,.5)}
+.chip.on{border-color:var(--accent);background:rgba(224,180,76,.14)}
+
+/* 地图本体：尺寸按 viewBox 单位算（1878×1517 缩到约 660px 宽，字号 21 约合屏幕上 7px） */
+.area{stroke:#33445a;stroke-width:1.1;vector-effect:non-scaling-stroke}
+.area.mine{cursor:pointer}
+.area.dest{cursor:pointer;stroke:var(--accent);stroke-width:2.4}
+.area.sel{stroke:#fff;stroke-width:2.6}
+/* 地名描一层底色：压在有色省份上也能看清。字号比 jDip 原版小一档——
+   全图缩到约 770px 宽时，26 号的「NWT/SWE」会糊成一团 */
+.alabel{font:600 21px/1 system-ui,sans-serif;fill:#93a4b8;pointer-events:none;text-anchor:middle;letter-spacing:.3px;
+  paint-order:stroke;stroke:#0b1017;stroke-width:3.5;stroke-linejoin:round}
+.unit{pointer-events:none}
+.unit circle{stroke:#0b1017;stroke-width:2.5}
+.unit text{font:700 23px/1 system-ui,sans-serif;fill:#0b1017;text-anchor:middle;dominant-baseline:central}
+.unit.ordered circle{stroke:var(--accent);stroke-width:4}
+.sc{pointer-events:none;fill:#c9d4e2;stroke:#0b1017;stroke-width:1}
 #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--accent);padding:10px 16px;border-radius:6px;font-size:13px;max-width:80vw;opacity:0;pointer-events:none;transition:opacity .2s;white-space:pre-wrap}
 #toast.show{opacity:1}
 #toast.err{border-left-color:var(--bad)}
@@ -128,6 +161,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
   <section class="panel">
     <div class="tabs">
       <button data-tab="brief" class="on">简报</button>
+      <button data-tab="map">地图</button>
       <button data-tab="send">发信</button>
       <button data-tab="orders">军令</button>
       <button data-tab="inbox">收件箱</button>
@@ -144,6 +178,20 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
       <textarea id="sendText" placeholder="提议：我春季不进勃艮第，你守好马赛。"></textarea>
       <button class="btn" id="btnSend">发送</button>
       <div class="hint">承诺没有强制力，允许欺骗。公开发言用 GLOBAL（上限 400 字）。</div>
+    </div>
+
+    <div class="pane" id="pane-map">
+      <div class="mapbar">
+        <span class="hint" id="mapHint">点自己的部队选中，再点亮起来的省份下令。</span>
+        <button class="btn ghost" id="btnMapOrders">去交军令</button>
+      </div>
+      <div class="mapbody">
+        <div class="mapwrap"><svg id="mapSvg" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="mapside">
+          <div class="hint" id="mapSel">还没有选中部队。带圆点的是补给中心，填充色是归属国。</div>
+          <div class="chiprow" id="mapActs"></div>
+        </div>
+      </div>
     </div>
 
     <div class="pane" id="pane-orders">
@@ -373,6 +421,8 @@ async function refresh(){
     setDeadline(st);
     const b=await api("/api/brief");
     $("#brief").innerHTML=renderBrief(b.text);
+    // 地图开着就跟着刷新：部队会动、中心会易主，用户看不到「图是上一阶段的」
+    if($("#pane-map").classList.contains("on")) loadMap();
     if(st.game_over){
       $("#banner").classList.remove("hidden");
       $("#banner").textContent="对局已结束："+(st.result_text||"")
@@ -489,6 +539,7 @@ document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
   history.replaceState(null,"","#"+b.dataset.tab);
   if(b.dataset.tab==="llm") loadLlm();
   if(b.dataset.tab==="replay") loadReplay();
+  if(b.dataset.tab==="map") loadMap();
 });
 (function initTab(){
   const want=(location.hash||"").replace("#","");
@@ -582,6 +633,192 @@ async function loadReplay(){
 
 $("#replayPick").onchange=e=>showReplayPhase(e.target.value);
 $("#btnReplay").onclick=()=>loadReplay();
+
+// ---------- 地图页签 ----------
+// 几何只拉一次（服务端从引擎自带 SVG 解析，整局不变）；局面每次进页签、每次推送都重拉——
+// 部队会动，补给中心会易主。点击**不生成**命令，只从 `/api/board` 给的合法串里挑一条，
+// 所以无论怎么点都不可能拼出非法命令。
+const POWER_KEY=Object.fromEntries(POWERS.map(([c,n,k])=>[c,"var(--"+k+")"]));
+const POWER_TAG=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
+// 标签是三个大写字母、字号 21：半宽约 0.62em×3/2 ≈ 20，半高约 8（基线在字形底部）
+const LABEL_DX=20, LABEL_DY=8;
+let geo=null, bd=null, sel=null;
+
+const unitAt=base=>(bd&&bd.units||[]).find(u=>u.at===base);
+const myUnitAt=base=>{const u=unitAt(base);return u&&bd&&u.power===bd.power?u:null;};
+const centerOwner=base=>(bd&&bd.centers||{})[base]||null;
+
+// 一个选中对象能下哪些令：`mine` 的键是基础地名（STP），命令串里才带海岸（F STP/SC ...），
+// 所以按「基础地名 + 兵种」比对，不能拿 `u.loc` 拼字符串去 startsWith。
+// 建造点没有兵种（`kind` 是 null），那一格只有 `A PAR B` / `F PAR B`，兵种两个字都得收。
+function ordersOf(s){
+  if(!s) return [];
+  const list=(bd&&bd.mine||{})[s.at]||[];
+  return list.filter(o=>{
+    const t=o.split(" ");
+    return t[1].split("/")[0]===s.at && (!s.kind || t[0]===s.kind);
+  });
+}
+// 能点的地方：平时是部队所在地，建造阶段是「没部队但有 B 令」的地盘
+const hasOrders=code=>((bd&&bd.mine||{})[code]||[]).length>0;
+// 一条令长什么样：`A PAR - BUR` / `A PAR S A MAR` / `A PAR H`，撤退是 `R`、调整是 `B`/`D`。
+// 第三个词就是动作代码，所以不靠字符串里有没有 " S " 去猜——`A PAR S A MAR - BUR` 和
+// `A PAR C A MAR - SPA` 的落点都在破折号后面，纯支援则没有落点。
+function parseOrder(o){
+  const t=o.trim().split(/\s+/), code=t[2]||"H";
+  const dest=t[3]?t[3].split("/")[0]:null;
+  if(code==="-") return {kind:"move",dest,label:"→ "+(dest||"?")+(t[4]==="VIA"?"（经海路）":"")};
+  if(code==="R") return {kind:"retreat",dest,label:"撤退 → "+(dest||"?")};
+  if(code==="H") return {kind:"hold",dest:null,label:"驻守"};
+  if(code==="D") return {kind:"disband",dest:null,label:"解散"};
+  // 同一格能造陆军也能造舰队，光写「建造」两个 chip 长得一模一样，得把兵种带上
+  if(code==="B") return {kind:"build",dest:null,label:"建"+(t[0]==="A"?"陆军":"舰队")};
+  const tail=o.split(" - ");
+  const at=tail.length>1?tail[1].split(" ")[0].split("/")[0]:null;
+  const subject=(o.split(" "+code+" ")[1]||"").replace(" - ","→");
+  if(code==="S") return {kind:"support",dest:at,label:"支援 "+subject};
+  if(code==="C") return {kind:"convoy",dest:at,label:"护航 "+subject};
+  return {kind:"other",dest:null,label:o};
+}
+const destOf=o=>parseOrder(o).dest;
+const rankOrder=o=>["move","retreat"].includes(parseOrder(o).kind)?0
+  :(["support","convoy"].includes(parseOrder(o).kind)?1:2);
+const orderChip=o=>parseOrder(o);
+
+function fillOf(code){
+  const own=centerOwner(code);
+  if(own) return POWER_KEY[own];
+  const a=geo.areas[code];
+  if(a.kind==="water") return "#16202c";
+  return a.sc?"#2b3a4c":"#1d2734";
+}
+
+function drawMap(){
+  const svg=$("#mapSvg");
+  if(!geo){ svg.innerHTML=""; return; }
+  // 取景按内容包围盒（`[x, y, w, h]`），不是文件里声明的 0 0 1835 1360——那个框会把
+  // 突尼斯、那不勒斯半截切掉，左边还空一片
+  svg.setAttribute("viewBox",(geo.viewBox||[0,0,1835,1360]).join(" "));
+  const dests=new Set();
+  if(sel) ordersOf(sel).forEach(o=>{const d=destOf(o); if(d) dests.add(d);});
+  // 文本框里已经写了的令，用一圈金色描边标出来——点了没反应最让人困惑
+  const written=new Set($("#ordersText").value.split("\n").map(s=>s.trim())
+    .filter(Boolean).map(s=>s.split(/\s+/).slice(0,2).join(" ").toUpperCase()));
+
+  const parts=[];
+  for(const code in geo.areas){
+    const a=geo.areas[code], own=centerOwner(code);
+    const cls=["area"];
+    if(myUnitAt(code)||hasOrders(code)) cls.push("mine");
+    if(sel&&sel.at===code) cls.push("sel");
+    else if(sel&&dests.has(code)) cls.push("dest");
+    const tip=`${code} · ${own?"属于"+POWER_TAG[own]:"中立"}${a.sc?" · 补给中心":""}`;
+    parts.push(`<path class="${cls.join(" ")}" data-loc="${code}" d="${a.d}" fill="${fillOf(code)}"`
+      +` fill-opacity="${own?0.45:1}"><title>${tip}</title></path>`);
+  }
+  // `at` 是标签的文字起点（左对齐基线），三项都以它为准往右补半个字宽、往上补半个字高：
+  // 地名 LABEL_DX、棋子/中心点再减 LABEL_DY。三个字母、字号 21，字宽约 0.62em。
+  for(const code in geo.areas){
+    const at=geo.areas[code].at;
+    if(at&&!unitAt(code)) parts.push(`<text class="alabel" x="${at[0]+LABEL_DX}" y="${at[1]}">${code}</text>`);
+  }
+  for(const code in geo.areas){
+    const a=geo.areas[code];
+    if(a.sc&&a.at) parts.push(`<circle class="sc" cx="${a.at[0]+LABEL_DX+24}" cy="${a.at[1]-LABEL_DY-7}" r="4.5"/>`);
+  }
+  for(const u of (bd&&bd.units||[])){
+    const a=geo.areas[u.at];
+    if(!a||!a.at) continue;
+    // 标签坐标是基线，棋子要往上挪一点才是视觉中心
+    const x=a.at[0]+LABEL_DX, y=a.at[1]-LABEL_DY;
+    const on=written.has(`${u.kind} ${u.loc}`.toUpperCase());
+    parts.push(`<g class="unit${on?" ordered":""}">`
+      +`<circle cx="${x}" cy="${y}" r="20" fill="${POWER_KEY[u.power]}"/>`
+      +`<text x="${x}" y="${y}">${u.kind}</text></g>`);
+  }
+  svg.innerHTML=parts.join("");
+}
+
+function renderActs(){
+  const box=$("#mapActs"), hint=$("#mapSel");
+  box.innerHTML="";
+  if(!bd){ hint.textContent="对局还没开始。"; return; }
+  // 建造阶段满地都是部队，但能点的是「有 B 令的地盘」——提示词得跟着换，否则叫人去点部队
+  const canBuild=Object.values(bd.mine||{}).some(l=>l.some(o=>o.split(" ")[2]==="B"));
+  if(!sel){
+    hint.textContent=canBuild
+      ? "调整阶段：点亮的地盘可以建造，点它选兵种。"
+      : "还没有选中部队。小圆点标的是补给中心，填充色是归属国；金色描边的部队已经下过令。";
+    return;
+  }
+  const list=ordersOf(sel);
+  const who=POWER_TAG[sel.power], ph=bd.phase;
+  hint.textContent=`${ph} · 已选 ${sel.kind?sel.kind+" ":""}${sel.loc}（${who}），${list.length} 个合法动作`
+    +(bd.editable?"":" · 这个阶段不是你的回合");
+  box.innerHTML=list.map((o,i)=>`<button class="chip ${orderChip(o).kind}" data-i="${i}">`
+    +`${esc(orderChip(o).label)}</button>`).join("")
+    ||'<span class="hint">这支部队本阶段没有可下的令。</span>';
+  box.querySelectorAll(".chip").forEach(b=>b.onclick=()=>applyOrder(list[+b.dataset.i]));
+}
+
+function applyOrder(order){
+  const ta=$("#ordersText");
+  // 同一支部队只留一条令：重复下令会被裁判整份打回，那比不给改更糟。
+  // 建造的「同一支部队」是同一个选址——`A PAR B` 和 `F PAR B` 只能留一个。
+  const key=s=>{
+    const t=s.split(/\s+/);
+    return t[2]==="B" ? "B "+t[1] : t.slice(0,2).join(" ").toUpperCase();
+  };
+  const lines=ta.value.split("\n").map(s=>s.trim()).filter(Boolean);
+  const k=key(order);
+  const at=lines.findIndex(l=>key(l)===k);
+  if(at>=0) lines[at]=order; else lines.push(order);
+  ta.value=lines.join("\n")+"\n";
+  toast("已写入 "+order+"（在「军令」页提交）","ok");
+  drawMap(); renderActs();
+}
+
+async function loadMap(){
+  if(!tokens[seat]){ bd=null; drawMap(); renderActs(); return; }
+  try{
+    // `no-cache` 是「可以缓存，但每次先问一句」：几何带 ETag，命中就是 304，
+    // 换了地图文件也不会让浏览器拿一天前的旧轮廓画图
+    const [g,b]=await Promise.all([
+      geo?Promise.resolve(geo):api("/api/map",{cache:"no-cache"}),
+      api("/api/board")]);
+    geo=g; bd=b;
+    // 阶段推进后那支部队可能已经不在了：选择态要跟着局面走，别留在幽灵身上。
+    // 建造点没有部队，它「还在不在」只能靠 `mine` 里那格有没有令来判断。
+    if(sel){
+      const at=sel.at, kind=sel.kind;
+      sel=(b.units||[]).find(u=>u.at===at&&u.power===b.power&&u.kind===kind)
+        || (kind===null&&((b.mine||{})[at]||[]).length?{kind:null,loc:at,at,power:b.power}:null);
+    }
+    drawMap(); renderActs();
+  }catch(e){ $("#mapSel").textContent=e.message; }
+}
+
+$("#mapSvg").onclick=e=>{
+  const loc=e.target&&e.target.dataset&&e.target.dataset.loc;
+  if(!loc||!bd) return;
+  const there=unitAt(loc);
+  if(there&&there.power!==bd.power) return;   // 别国的部队不响应，别让人以为自己点坏了
+  const mine=myUnitAt(loc);
+  if(mine&&!(sel&&sel.at===loc)){ sel=mine; drawMap(); renderActs(); return; }
+  // 建造阶段那块地上没有部队，`mine` 里有 B 令才是能点的建造点
+  const site=!there&&hasOrders(loc);
+  if(site&&!(sel&&sel.at===loc&&sel.kind===null)){
+    sel={kind:null,loc,at:loc,power:bd.power}; drawMap(); renderActs(); return;
+  }
+  if(sel){
+    const hits=ordersOf(sel).filter(o=>destOf(o)===loc).sort((a,b)=>rankOrder(a)-rankOrder(b));
+    if(hits.length){ applyOrder(hits[0]); return; }
+    if(sel.at===loc){ sel=null; drawMap(); renderActs(); return; }
+    toast(`${loc} 不是 ${sel.loc} 这阶段能去的地方`,"err");
+  }
+};
+$("#btnMapOrders").onclick=()=>document.querySelector('[data-tab="orders"]').click();
+
 
 // ---------- 模型页签 ----------
 let llmSeats={};

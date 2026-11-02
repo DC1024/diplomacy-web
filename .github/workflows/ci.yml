@@ -101,8 +101,8 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8082/api/match)
           test "$code" = "403" && echo "403 ok"
           echo "--- 带密钥应 200 且 7 个令牌 ---"
-          curl -fsS -X POST http://127.0.0.1:8082/api/match -H 'X-Admin-Key: smoke' \
-            | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['tokens'])==7, d; print('gated match ok')"
+          curl -fsS -X POST http://127.0.0.1:8082/api/match -H 'X-Admin-Key: smoke' > /tmp/match.json
+          python -c "import json; d=json.load(open('/tmp/match.json',encoding='utf-8')); assert len(d['tokens'])==7, d; print('gated match ok')"
           echo "--- 座位链接应一国一条，令牌与国家对得上 ---"
           curl -fsS -X POST http://127.0.0.1:8082/api/links -H 'X-Admin-Key: smoke' \
             | python -c "import json,sys; from urllib.parse import urlparse,parse_qs; d=json.load(sys.stdin)['links']; assert len(d)==7, d; assert all(parse_qs(urlparse(u).query)['seat']==[p] for p,u in d.items()), d; print('links ok')"
@@ -111,6 +111,15 @@ jobs:
           curl -sN --max-time 5 http://127.0.0.1:8082/api/events > /tmp/sse.txt || true
           head -4 /tmp/sse.txt
           python -c "import sys; raw=open('/tmp/sse.txt',encoding='utf-8').read(); assert 'event: state' in raw, '没收到 state 帧：'+raw[:200]; assert 'token' not in raw.lower(), '推送里混进了座位令牌'; print('sse ok')"
+          echo "--- 地图几何要能从 wheel 里带的 standard.svg 解析出来 ---"
+          # 这一步只在容器里才有意义：本地跑通了不代表镜像里有那份 SVG
+          curl -fsS http://127.0.0.1:8082/api/map > /tmp/map.json
+          python -c "import json; d=json.load(open('/tmp/map.json',encoding='utf-8')); assert len(d['areas'])==76, len(d['areas']); assert d['missing']==[], d['missing']; assert len(d['viewBox'])==4, d['viewBox']; print('map ok', len(d['areas']), 'areas')"
+          echo "--- 地图数据面：22 支部队、34 个中心，命令只给自己的座位 ---"
+          # 令牌换座位就看，法国只应拿到 BRE/MAR/PAR 三处可下令地点
+          T=$(python -c "import json;print(json.load(open('/tmp/match.json'))['tokens']['FRANCE'])")
+          curl -fsS http://127.0.0.1:8082/api/board -H "X-Seat-Token: $T" > /tmp/board.json
+          python -c "import json; d=json.load(open('/tmp/board.json',encoding='utf-8')); assert len(d['units'])==22, len(d['units']); assert len(d['centers'])==22, len(d['centers']); assert set(d['mine'])=={'BRE','MAR','PAR'}, d['mine']; assert d['editable'] is True; print('board ok')"
       - name: 失败时打印管理密钥日志
         if: failure()
         run: docker logs dw-adm || true

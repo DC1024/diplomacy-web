@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
@@ -17,7 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -27,6 +28,7 @@ from .engine.arena import POWERS, Arena, OrderError
 from .llm import LLMSeat, SeatRunner, Usage, from_env
 from .llm import build as build_context
 from .llm.orders import hold_orders
+from .map_data import geometry
 from .persist import save
 
 # 版本由构建期注入（Dockerfile 的 APP_VERSION 来自 git tag），避免镜像标签与 /healthz 漂移。
@@ -407,6 +409,56 @@ def legal(x_seat_token: Annotated[str | None, Header()] = None,
     with a.lock:
         text = a.legal(power, [x for x in locs.split(",") if x])
     return dict(text=text)
+
+
+@app.get("/api/map")
+def map_shape(request: Request) -> Response:
+    """标准地图的轮廓与棋子锚点（`app/map_data.py` 从引擎自带 SVG 里抽出来的）。
+
+    不需要鉴权：这只是底图，没有对局信息。解析一次约 0.3 秒，之后走进程内缓存；
+    响应带一天缓存 + ETag——**几何真的变了**（换了地图文件）要能立刻生效，靠校验器而不是
+    靠用户清缓存：前端按 `no-cache` 取，命中就 304，只花一个来回。
+    """
+    data = geometry()
+    body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
+    # 版本就是内容哈希：改了 SVG 或解析逻辑，标签自然就变
+    etag = '"' + hashlib.sha1(body).hexdigest()[:16] + '"'
+    headers = {"ETag": etag, "Cache-Control": "public, max-age=86400"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
+
+
+@app.get("/api/board")
+def board(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
+    """地图页要的局面：谁在哪、哪个补给中心归谁、**你**能下哪些令。
+
+    部队与中心归属在 Diplomacy 里是公开信息（`brief()` 本来就把整张局面写给每个人），
+    所以这里不按座位过滤；唯一私密的是 `mine`——只含调用者座位的合法命令。
+
+    `mine` 的键是**基础地名**（`STP`），命令串里才带海岸（`F STP/SC - BOT`）。引擎的
+    `get_orderable_locations()` 就是这么给的，而地图上的形状也只到基础省份这一层——
+    两边正好对齐，前端不必自己拆海岸。
+    """
+    a = require_arena()
+    power = seat(a, x_seat_token)
+    with a.lock:
+        game = a.game()
+        units, centers = [], {}
+        for who in POWERS:
+            for line in game.get_units(who):
+                kind, loc = line.split(" ", 1)
+                units.append(dict(power=who, kind=kind, loc=loc, at=loc.split("/")[0]))
+            for center in game.get_centers(who):
+                centers[center] = who
+        mine_locs = game.get_orderable_locations(power)
+        possible = game.get_all_possible_orders()
+        return dict(
+            power=power, phase=game.get_current_phase(), stage=a.data["stage"],
+            paused=a.data["paused"], units=units, centers=centers,
+            mine={loc: sorted(possible[loc]) for loc in mine_locs},
+            editable=bool(mine_locs),
+        )
 
 
 @app.get("/api/inbox")
