@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 
 from app.engine.arena import POWERS
 from app.llm import LLMSeat, ScriptedProvider, SeatRunner
+from app.llm.context import KEEP_MSGS, SELF_CHARS, SELF_KEEP, estimate_tokens
 from app.llm.context import build as build_context
-from app.llm.context import estimate_tokens
 from app.llm.orders import hold_orders
 from app.llm.seats import parse_action
 
@@ -133,6 +133,97 @@ def test_messages_from_model_respect_limits(srv):
     out = s.act(main.require_arena())
     assert out["said"][0]["ok"] is False
     assert "超过上限" in out["said"][0]["error"]
+
+
+def test_seat_sees_its_own_offer_before_the_reply(srv):
+    """谈判记忆：模型必须看得到自己发出的信。
+
+    引擎的 `incoming()` 过滤掉 `sender == power`，所以 FRANCE 提了条款、AUSTRIA 回了
+    「同意。」之后，FRANCE 的上下文里原先只剩那句「同意。」——同意的是什么无从得知。
+    承诺变成随机遗忘，结盟与背叛就不再是有意的策略。人类收件箱（`inbox()`）本来就含
+    自己发出的信，`context._own()` 只是把模型补齐到同一水平。
+    """
+    client, main = srv
+    client.post("/api/match")
+    a = main.require_arena()
+    a.act("FRANCE", dict(action="send", to="AUSTRIA", text="我不打比利时，你把北海让给我。",
+                         request_id="m1"))
+    a.act("AUSTRIA", dict(action="send", to="FRANCE", text="同意。", request_id="m2"))
+
+    mine = build_context(a, "FRANCE").as_prompt()
+    assert "你 → AUSTRIA：我不打比利时，你把北海让给我。" in mine, mine
+    assert "[S1901M] AUSTRIA → 你：同意。" in mine, mine
+
+    theirs = build_context(a, "AUSTRIA").as_prompt()
+    assert "[S1901M] FRANCE → 你：我不打比利时" in theirs  # 收件人照旧看得到原文
+    assert "你 → AUSTRIA" not in theirs  # 别把「自己发出」的块抄进别人上下文
+
+    outsider = build_context(a, "GERMANY").as_prompt()
+    assert "比利时" not in outsider and "→ 你：同意。" not in outsider
+
+
+def test_own_messages_are_capped_and_truncated(srv):
+    """自己发出的信也要封顶：只留最近 6 封，单封截到 120 字。
+
+    否则一个每回合写满 300 字的座位，光「自己说过什么」就能把上下文顶回全量水位。
+    """
+    client, main = srv
+    client.post("/api/match")
+    a = main.require_arena()
+    for i in range(10):
+        a.act("ITALY", dict(action="send", to="FRANCE", text=f"第{i}号提案：" + "细节" * 100,
+                            request_id=f"c{i}"))
+
+    ctx = build_context(a, "ITALY")
+    assert ctx.stats["kept_own"] == SELF_KEEP
+    assert "第3号提案" not in ctx.own, "最早的几封应当已经滑出窗口"
+    assert "第4号提案" in ctx.own and "第9号提案" in ctx.own
+    assert "…" in ctx.own, "超出 120 字的应该被截断"
+    assert max(len(line) for line in ctx.own.splitlines()) < SELF_CHARS + 40
+
+
+def test_opponent_message_appears_exactly_once(srv):
+    """补自己的信，不能把对方的信重抄一遍——否则模型会以为收到两封。"""
+    client, main = srv
+    client.post("/api/match")
+    a = main.require_arena()
+    a.act("FRANCE", dict(action="send", to="AUSTRIA", text="北海归我。", request_id="n1"))
+    a.act("AUSTRIA", dict(action="send", to="FRANCE", text="同意。", request_id="n2"))
+    assert build_context(a, "FRANCE").as_prompt().count("同意。") == 1
+
+
+def test_dropped_messages_are_announced(srv):
+    """消息按条数裁，滑出窗口的要说明一句。
+
+    没有这句话，模型会把「这一回合没看到某国来信」当成「它没找过我」，
+    而真相可能是那封信在三个阶段前就滑出窗口了。
+    """
+    client, main = srv
+    client.post("/api/match")
+    a = main.require_arena()
+    for i in range(40):
+        a.act("FRANCE", dict(action="send", to="ITALY", text=f"第{i}封：条件照旧。",
+                             request_id=f"w{i}"))
+
+    ctx = build_context(a, "ITALY")
+    assert ctx.dropped_messages == 40 - KEEP_MSGS
+    assert f"更早的 {40 - KEEP_MSGS} 条消息已滑出" in ctx.note
+    prompt = ctx.as_prompt()
+    assert "第0封" not in prompt and "第39封" in prompt
+
+
+def test_debug_context_matches_the_real_prompt(srv):
+    """`/api/llm/context` 必须原样拼出模型真收到的东西，否则调试面板只是自我安慰。"""
+    client, main = srv
+    client.post("/api/match")
+    a = main.require_arena()
+    a.act("TURKEY", dict(action="send", to="RUSSIA", text="黑海我不动。", request_id="d1"))
+
+    d = client.get("/api/llm/context?power=TURKEY").json()
+    joined = "\n".join(p for p in (d["digest"], d["own"], d["note"], d["text"]) if p)
+    assert joined == build_context(a, "TURKEY").as_prompt()
+    assert "你 → RUSSIA：黑海我不动。" in d["own"]
+    assert d["stats"]["kept_own"] == 1
 
 
 def test_full_game_driven_entirely_by_seats(srv):

@@ -456,7 +456,9 @@ def llm_context(power: str, x_admin_key: Annotated[str | None, Header()] = None)
     require_admin(x_admin_key)
     a = require_arena()
     ctx = build_context(a, power.upper(), KEEP_HIST, KEEP_MSGS)
-    return dict(power=power.upper(), digest=ctx.digest, text=ctx.text,
+    # 四个字段原样拼起来就是 `as_prompt()`：调试面板看到的必须等于模型真收到的
+    return dict(power=power.upper(), digest=ctx.digest, own=ctx.own, note=ctx.note,
+                text=ctx.text,
                 dropped_history=ctx.dropped_history, dropped_messages=ctx.dropped_messages,
                 stats=ctx.stats)
 

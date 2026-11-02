@@ -530,9 +530,10 @@ $("#btnCtx").onclick=async()=>{
     const d=await api("/api/llm/context?power="+encodeURIComponent(seat));
     $("#ctxOut").classList.remove("hidden");
     $("#ctxOut").textContent=`${NAME[seat]} 的上下文：${d.stats.chars} 字 ≈ ${d.stats.tokens} token`
-      + `（保留 ${d.stats.kept_history} 段结算 / ${d.stats.kept_messages} 条消息，`
-      + `略去 ${d.dropped_history} 段历史 / ${d.dropped_messages} 条消息）\n`
-      + "─".repeat(40)+"\n"+d.digest+"\n"+"─".repeat(40)+"\n"+d.text;
+      + `（保留 ${d.stats.kept_history} 段结算 / ${d.stats.kept_messages} 条消息`
+      + (d.stats.kept_own?` / 自己发出 ${d.stats.kept_own} 封`:"")
+      + `，略去 ${d.dropped_history} 段历史 / ${d.dropped_messages} 条消息）\n`
+      + "─".repeat(40)+"\n"+[d.digest,d.own,d.note,d.text].filter(Boolean).join("\n");
   }catch(e){ toast(e.message,"err"); }
 };
 
