@@ -65,12 +65,15 @@ def test_links_bind_exactly_one_seat_each(tmp_path, monkeypatch):
             assert who == power
 
 
-def test_links_warn_when_deployment_is_open(tmp_path, monkeypatch):
-    """没设密钥时链接没有保密意义，要明说，别让人误以为安全。"""
-    client, _, _ = started(tmp_path, monkeypatch, admin_key=None)
+def test_links_carry_a_spectate_link(tmp_path, monkeypatch):
+    """发链接时顺手给一条观战链接：观众只能看 + 发言，碰不到任何座位。"""
+    client, _, ok = started(tmp_path, monkeypatch, "k")
     with client:
-        d = client.post("/api/links").json()
-        assert d["notice"] and "ADMIN_KEY" in d["notice"]
+        d = client.post("/api/links", headers=ok).json()
+        assert d["spectate"].startswith("http")
+        code = parse_qs(urlparse(d["spectate"]).query)["watch"][0]
+        # 观战码不是座位令牌：拿它调 /api/me 必须被拒，否则「观战」就成了后门
+        assert client.get("/api/me", headers={"X-Seat-Token": code}).status_code == 403
 
 
 def test_links_need_an_existing_match(tmp_path, monkeypatch):

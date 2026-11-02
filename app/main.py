@@ -31,6 +31,7 @@ from .llm import settings as llm_settings
 from .llm.orders import hold_orders
 from .map_data import geometry
 from .persist import save
+from .spectate import SpectateChannel
 
 # 版本由构建期注入（Dockerfile 的 APP_VERSION 来自 git tag），避免镜像标签与 /healthz 漂移。
 # 本地直接跑时没有注入，别硬编码一个具体版本——那会让 /healthz 说谎，用 dev 占位最诚实。
@@ -39,7 +40,12 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 STATE_PATH = DATA_DIR / "state.json"
 STATIC_DIR = Path(__file__).parent / "static"
 
-# 管理密钥：留空表示"本机单人"模式，建局/清档不鉴权；一旦对外开放必须设置。
+# 观战频道：观众之间的公开聊天。与 state.json（对局）、seats.json（模型座位）并列，
+# 三份文件各管一件事——存档不该同时承担「棋走到哪」和「观众聊了什么」。
+SPECTATE = SpectateChannel(DATA_DIR / "spectate.json",
+                           min_gap=float(os.environ.get("SPECTATE_MIN_GAP", "1.0")))
+
+# 管理密钥：留空表示"本机单人"模式——但**只对本机**放行，见 admin_locked()。
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "").strip()
 
 # 监听地址：决定"没设密钥"是安全的（只有本机能连）还是危险的（整个局域网/公网都能连）。
@@ -97,11 +103,50 @@ def seat(a: Arena, token: str | None) -> str:
 
 
 def require_admin(key: str | None) -> None:
-    """设置了 ADMIN_KEY 才校验；留空时放行（本机单人模式）。"""
-    if not ADMIN_KEY:
+    """管理面：设了 ADMIN_KEY 就校验；留空时**只有本机**放行。
+
+    这里以前是「留空一律放行」，等于把「本机单人」的方便原样搬到公网：任何能打开
+    页面的人都能调 `/api/match` 拿到全部 7 个座位令牌（一次读完七国私信）、清空存档、
+    改模型密钥。现在留空 + 对外监听 = **管理面全锁**，页面顶部会写明怎么解开。
+
+    取舍：宁可让部署者撞一个 403 去配密钥，也不要在无人看守时把令牌发给第一个访问者。
+    """
+    if is_admin(key):
         return
-    if not key or not hmac.compare_digest(key, ADMIN_KEY):
+    if ADMIN_KEY:
         raise HTTPException(403, "需要管理员密钥：请在页面右上角填写，或传 X-Admin-Key 请求头")
+    raise HTTPException(
+        403,
+        "未设置 ADMIN_KEY 且监听在非回环地址：管理面已锁定。"
+        "请加 -e ADMIN_KEY=<长随机串> 后重启；只在本机玩就把监听改回 127.0.0.1。",
+    )
+
+
+def is_admin(key: str | None) -> bool:
+    """不抛异常的版本：观战频道要判断「这条发言是不是房主发的」。"""
+    if ADMIN_KEY:
+        return bool(key) and hmac.compare_digest(key, ADMIN_KEY)
+    return not bound_off_loopback()
+
+
+def admin_locked() -> bool:
+    """管理面是否因为「没设密钥 + 对外可达」被锁死。
+
+    与 `exposed` 的区别：`exposed` 说「外面连得上」，这个说「连得上但没人管得了」。
+    前端要按后者决定提示文案——两者的处置完全不同。
+    """
+    return not ADMIN_KEY and bound_off_loopback()
+
+
+def optional_seat(a: Arena, token: str | None) -> str | None:
+    """有令牌就认，没有就返回 None（旁观视角）。
+
+    令牌**给了但不对**必须报错，不能悄悄降级成旁观：否则座位链接轮换后，玩家会看到
+    「能看不能交令」的页面，还以为是前端坏了。只有「压根没带令牌」才是旁观。
+    """
+    if not token:
+        return None
+    return seat(a, token)
 
 
 def summary(a: Arena, st: dict | None = None) -> dict:
@@ -237,17 +282,20 @@ class ResetReq(BaseModel):
 
 @app.get("/healthz")
 def healthz() -> dict:
-    """探活。exposed 让前端自己判断"没密钥"要不要报警。"""
+    """探活。exposed 说「外面连得上」，admin_locked 说「连得上但没人管得了」。"""
     return dict(ok=True, version=VERSION, has_match=arena() is not None,
-                admin_required=bool(ADMIN_KEY), exposed=bound_off_loopback())
+                admin_required=bool(ADMIN_KEY), admin_locked=admin_locked(),
+                exposed=bound_off_loopback(),
+                spectate=dict(has_key=bool(SPECTATE.data["key"])))
 
 
 @app.post("/api/match")
 def new_match(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
-    """建局或返回现有对局。热座模式：一次返回全部 7 个座位令牌。
+    """建局或返回现有对局。**只有管理员**能调——一次返回全部 7 个座位令牌。
 
-    这个接口会吐出全部座位令牌（等于交出所有私信），设置 ADMIN_KEY 后必须带密钥，
-    否则任何拿到地址的人都能读全场的私信。
+    这个接口吐出全部座位令牌（等于交出所有私信），所以它必须站在管理面后面。
+    无密钥又对外监听时 `require_admin` 会直接 403，页面表现为「等待管理密钥」。
+    真玩家不走这里：他们拿的是 `/api/links` 发出去的**单人单链接**。
     """
     global _arena
     require_admin(x_admin_key)
@@ -257,6 +305,7 @@ def new_match(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             a = Arena.create(STATE_PATH)
             _arena = a
+            SPECTATE.reset(a.data["match_id"])
             log.info("新建对局 %s", a.data["match_id"])
         return dict(match_id=a.data["match_id"], phase=a.game().get_current_phase(),
                     tokens=a.data["tokens"], summary=summary(a))
@@ -274,8 +323,8 @@ def make_links(request: Request, x_admin_key: Annotated[str | None, Header()] = 
     base = str(request.base_url).rstrip("/")
     return dict(
         links={p: f"{base}/?seat={p}&t={a.data['tokens'][p]}" for p in POWERS},
-        notice=None if ADMIN_KEY else
-        "当前没设 ADMIN_KEY：任何人都能调 /api/match 拿到全部令牌，发链接没有保密意义",
+        spectate=f"{base}/?watch={SPECTATE.code()}",
+        notice=None,
     )
 
 
@@ -296,6 +345,7 @@ def reset(req: ResetReq, x_admin_key: Annotated[str | None, Header()] = None) ->
         _arena = Arena.create(STATE_PATH)
         _runner.reset()
         _clock.reset()
+        SPECTATE.reset(_arena.data["match_id"])
         # 新局重置花费与停摆，但**保留用户按下的暂停**：那是「这一国暂时不给模型」的
         # 意图，不该被新开一局悄悄改掉
         for llm_seat in _seats.values():
@@ -444,12 +494,15 @@ def board(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
     部队与中心归属在 Diplomacy 里是公开信息（`brief()` 本来就把整张局面写给每个人），
     所以这里不按座位过滤；唯一私密的是 `mine`——只含调用者座位的合法命令。
 
+    **不带令牌也能看**（观战视角）：`mine` 为空、`editable` 为假。合法命令在 Diplomacy
+    里等于意图宣言，一场围观不该顺手把它交出去——这是观众与玩家的分界线。
+
     `mine` 的键是**基础地名**（`STP`），命令串里才带海岸（`F STP/SC - BOT`）。引擎的
     `get_orderable_locations()` 就是这么给的，而地图上的形状也只到基础省份这一层——
     两边正好对齐，前端不必自己拆海岸。
     """
     a = require_arena()
-    power = seat(a, x_seat_token)
+    power = optional_seat(a, x_seat_token)
     with a.lock:
         game = a.game()
         units, centers = [], {}
@@ -459,13 +512,14 @@ def board(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
                 units.append(dict(power=who, kind=kind, loc=loc, at=loc.split("/")[0]))
             for center in game.get_centers(who):
                 centers[center] = who
-        mine_locs = game.get_orderable_locations(power)
-        possible = game.get_all_possible_orders()
+        mine = {}
+        if power:
+            possible = game.get_all_possible_orders()
+            mine = {loc: sorted(possible[loc]) for loc in game.get_orderable_locations(power)}
         return dict(
-            power=power, phase=game.get_current_phase(), stage=a.data["stage"],
+            power=power or "", phase=game.get_current_phase(), stage=a.data["stage"],
             paused=a.data["paused"], units=units, centers=centers,
-            mine={loc: sorted(possible[loc]) for loc in mine_locs},
-            editable=bool(mine_locs),
+            mine=mine, editable=bool(mine),
         )
 
 
@@ -483,11 +537,17 @@ def inbox(x_seat_token: Annotated[str | None, Header()] = None,
 @app.get("/api/history")
 def history(x_seat_token: Annotated[str | None, Header()] = None,
             phase: str | None = None) -> dict:
+    """结算原文。**不带令牌也能看**，只是没有「（你）」标记。
+
+    结算记录本来就是公开的（谁动了哪支、成没成），`_settlement(record, power)` 里
+    唯一按座位变化的只有那个「（你）」后缀。所以这里给 `power=""` 就是干净的公开版，
+    不需要另造一套「观众版结算」逻辑。
+    """
     a = require_arena()
-    power = seat(a, x_seat_token)
+    power = optional_seat(a, x_seat_token) or ""
     with a.lock:
         text = a.history_text(power, phase)
-    return dict(text=text)
+    return dict(text=text, power=power)
 
 
 @app.get("/api/replay")
@@ -497,13 +557,16 @@ def replay(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
     私信是最容易在这里漏的东西——`inbox(power, phase=...)` 本身按座位过滤，
     所以一局打完后，任何人拿自己的令牌只能看到「自己收到/发出的那些信」。
     不要为了「看起来完整」去返回全量 messages，那等于把复盘页做成偷看面板。
+
+    观战者是 `power=None`：结算全给、**messages 一律为空字符串**。空缺不是遗漏——
+    「这一阶段有没有信」本身就是信息，连条数都不该给观众。
     """
     a = require_arena()
-    power = seat(a, x_seat_token)
+    power = optional_seat(a, x_seat_token) or ""
     with a.lock:
-        history = list(a.data["history"])
+        history_log = list(a.data["history"])
         items = []
-        for i, rec in enumerate(history, 1):
+        for i, rec in enumerate(history_log, 1):
             phase = rec["phase"]
             centers = rec.get("centers") or {}
             items.append(dict(
@@ -513,7 +576,7 @@ def replay(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
                 agreed_draw=rec.get("event") == "agreed_draw",
                 text=a.history_text(power, phase),
                 centers={p: len(c) for p, c in centers.items() if c},
-                messages=a.inbox(power, phase=phase),
+                messages=a.inbox(power, phase=phase) if power else "",
             ))
         current = a.game().get_current_phase()
         stage = a.data["stage"]
@@ -540,6 +603,79 @@ def orders(req: OrdersReq, x_seat_token: Annotated[str | None, Header()] = None)
 @app.post("/api/draw")
 def draw(req: DrawReq, x_seat_token: Annotated[str | None, Header()] = None) -> dict:
     return _act(x_seat_token, dict(action="draw" if req.vote else "undraw"))
+
+
+# ---------------- 观战频道 ----------------
+
+class SayReq(BaseModel):
+    name: str = Field("", max_length=40, description="昵称，留空叫「旁观者」")
+    text: str = Field(..., max_length=400)
+
+
+def _client(request: Request) -> str:
+    """限频用的来源标识。
+
+    放在 nginx 后面时这里恒为代理地址，全馆共用一个桶——观战频道本来就只打算给
+    一小圈人用，共用 1 秒一条的桶仍然比「不限」好。真要做按人限频得先信任
+    X-Forwarded-For，而信任它需要先确定代理层是干净的，这一步留到有需要时再做。
+    """
+    return getattr(request.client, "host", "") or "?"
+
+
+@app.get("/api/spectate")
+def spectate_read(after: int = Query(0, ge=0),
+                  x_spectate_key: Annotated[str | None, Header()] = None,
+                  x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """观战频道：**谁都能读**。
+
+    频道里只有观众看得见的东西（观众本来就只能看公开信息），所以玩家读到它不会
+    多知道一个字；反过来，玩家看到他国被怎么评价也挺有意思。真正的门在写那一侧。
+    """
+    a = arena()
+    return dict(
+        messages=SPECTATE.since(after),
+        phase=a.game().get_current_phase() if a else "",
+        can_say=is_admin(x_admin_key) or SPECTATE.matches(x_spectate_key),
+        has_key=bool(SPECTATE.data["key"]),
+    )
+
+
+@app.post("/api/spectate")
+def spectate_say(req: SayReq, request: Request,
+                 x_spectate_key: Annotated[str | None, Header()] = None,
+                 x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """发言要观战码。这是一条公网可写入口，旁边就是正在进行的对局，不能裸开。"""
+    if not (is_admin(x_admin_key) or SPECTATE.matches(x_spectate_key)):
+        raise HTTPException(403, "发言需要观战码：向房主要一条观战链接（/?watch=<码>）。")
+    a = arena()
+    try:
+        message = SPECTATE.say(req.name, req.text,
+                              phase=a.game().get_current_phase() if a else "",
+                              who=_client(request))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return dict(ok=True, message=message)
+
+
+@app.get("/api/spectate/key")
+def spectate_key(request: Request,
+                 x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """观战码只给管理员看。
+
+    码等于「发言权」，拿到就能往频道里写字。管理员需要把它变成一条链接发给朋友，
+    所以这里回完整明文——它不像 API Key 那样是长期凭证，轮换一次就作废。
+    """
+    require_admin(x_admin_key)
+    code = SPECTATE.code()
+    base = str(request.base_url).rstrip("/")
+    return dict(key=code, link=f"{base}/?watch={code}")
+
+
+@app.post("/api/spectate/rotate")
+def spectate_rotate(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """换一把码：已经发出去的观战链接全部失效。"""
+    require_admin(x_admin_key)
+    return dict(key=SPECTATE.rotate())
 
 
 # ---------------- LLM 座位（B1）----------------

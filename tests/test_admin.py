@@ -23,12 +23,42 @@ def make_server(tmp_path, monkeypatch, admin_key, host="0.0.0.0"):
     return TestClient(main.app)
 
 
-def test_open_mode_without_admin_key(tmp_path, monkeypatch):
-    with make_server(tmp_path, monkeypatch, None) as client:
+def test_loopback_without_key_stays_open(tmp_path, monkeypatch):
+    """本机单人：没密钥也能建局，这是开发体验的底线。"""
+    with make_server(tmp_path, monkeypatch, None, host="127.0.0.1") as client:
         assert client.get("/healthz").json()["admin_required"] is False
         r = client.post("/api/match")
         assert r.status_code == 200
         assert len(r.json()["tokens"]) == 7
+
+
+def test_exposed_without_key_is_locked(tmp_path, monkeypatch):
+    """对外监听又没密钥：管理面全锁。
+
+    以前这里是「留空一律放行」，等于把本机的方便原样搬到公网——任何能打开页面的人
+    都能一次拿到 7 个座位令牌（读完七国私信）并清空存档。现在宁可 403。
+    """
+    with make_server(tmp_path, monkeypatch, None) as client:      # host 默认 0.0.0.0
+        h = client.get("/healthz").json()
+        assert h["exposed"] is True
+        assert h["admin_locked"] is True
+        r = client.post("/api/match")
+        assert r.status_code == 403
+        assert "ADMIN_KEY" in r.json()["detail"]
+
+
+def test_locking_admin_still_lets_people_watch(tmp_path, monkeypatch):
+    """锁的是管理面，不是整个服务：局面是公开信息，旁观者该能看。"""
+    with make_server(tmp_path, monkeypatch, "s3cret") as client:
+        ok = {"X-Admin-Key": "s3cret"}
+        assert client.post("/api/match", headers=ok).status_code == 200
+    # 换成一个「没密钥 + 对外」的实例，读同一个 DATA_DIR
+    with make_server(tmp_path, monkeypatch, None) as client:
+        assert client.get("/api/state").status_code == 200
+        board = client.get("/api/board")
+        assert board.status_code == 200
+        assert board.json()["mine"] == {}          # 观众拿不到任何合法命令
+        assert client.get("/api/brief").status_code == 401
 
 
 def test_healthz_reports_admin_required(tmp_path, monkeypatch):

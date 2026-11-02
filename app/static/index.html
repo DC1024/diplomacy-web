@@ -178,6 +178,11 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 #warn.mini .wfull{display:none}
 #warn.mini .wbrief{display:block}
 .hidden{display:none!important}
+.chat{display:flex;flex-direction:column;gap:7px;max-height:44vh;overflow:auto;padding:9px 2px;margin-bottom:12px;border-bottom:1px solid var(--line)}
+.chat .cm{font-size:13px;line-height:1.6}
+.chat .cm .who{color:var(--accent);font-weight:600}
+.chat .cm .at{color:var(--muted);font-size:11px;margin-left:7px;font-variant-numeric:tabular-nums}
+.chat .empty{color:var(--muted);font-size:13px}
 @media(max-width:700px){aside{width:100%;border-right:none;border-bottom:1px solid var(--line);max-height:150px}main{flex-direction:column}}
 </style>
 </head>
@@ -198,16 +203,15 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 <div id="warn" class="hidden">
   <div class="wfull">
     <div class="wbody">
-      <b>危险：这个部署对网络开放，却没有设管理密钥。</b><br>
-      任何能打开本页的人，都能用 <code>POST /api/match</code> 拿到全部 7 个座位令牌——
-      等于一次读完七国的所有私信，也能直接清空存档。容器默认监听 <code>0.0.0.0</code>，
-      再用 <code>-p 8080:8080</code> 发布出去，整个局域网就都能连。<br>
-      正式对局请加 <code>-e ADMIN_KEY=你的长随机串</code> 后重启。只在本机玩，把端口映射改成
-      <code>-p 127.0.0.1:8080:8080</code>，然后点右边「收起」——这条提示会记住你的选择。
+      <b>这个部署对网络开放，但没设管理密钥 —— 管理面已锁定。</b><br>
+      建局、重置、发座位令牌、改模型配置现在全部返回 403；外人打开只能围观。
+      这样即使没人看守，也不会有人一次拿到 7 个座位令牌把全场私信读走，更不会把存档清掉。<br>
+      要开局请加 <code>-e ADMIN_KEY=你的长随机串</code> 后重启，再在右上角填入同一个串。
+      只在本机玩就把端口映射改成 <code>-p 127.0.0.1:8080:8080</code>，然后点右边「收起」。
     </div>
     <button id="warnMini">收起</button>
   </div>
-  <div class="wbrief" id="warnBrief">⚠ 未设管理密钥，令牌对网络开放 —— 点此看详情</div>
+  <div class="wbrief" id="warnBrief">⚠ 未设管理密钥，管理面已锁定（只能围观） —— 点此看详情</div>
 </div>
 <div class="banner" id="banner">热座模式：你持有全部七个座位的令牌，点左侧国家即切换视角。正式对局请把令牌分发给不同玩家。</div>
 <main>
@@ -216,6 +220,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
     <div class="tabs">
       <button data-tab="brief" class="on">简报</button>
       <button data-tab="map">地图</button>
+      <button data-tab="watch">观战</button>
       <button data-tab="send">发信</button>
       <button data-tab="orders">军令</button>
       <button data-tab="inbox">收件箱</button>
@@ -224,6 +229,24 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
       <button data-tab="admin" id="tabAdmin">管理</button>
     </div>
     <div class="pane on" id="pane-brief"><div id="brief"></div></div>
+
+    <div class="pane" id="pane-watch">
+      <div class="hint" id="watchHead">观战频道：所有人都能看。发言需要一个观战码。</div>
+      <div class="chat" id="watchList"></div>
+      <div class="row">
+        <div style="flex:0 0 132px"><label>昵称</label>
+          <input id="watchName" maxlength="12" placeholder="旁观者" autocomplete="off"></div>
+        <div style="flex:1"><label>发言（<span id="watchCount">0</span>/200 字）</label>
+          <input id="watchText" maxlength="200" placeholder="德国这波调虎离山" autocomplete="off"></div>
+      </div>
+      <div class="row">
+        <button class="btn hidden" id="btnSay">发送</button>
+        <input id="watchKey" class="hidden" placeholder="观战码" autocomplete="off" style="flex:1;max-width:260px">
+        <button class="btn ghost" id="btnWatchKey">用观战码</button>
+      </div>
+      <div class="hint" id="watchTip">观众只能看：局面与结算公开，交令与私信一概碰不到。
+        要发言请用房主发的 <code>/?watch=…</code> 链接。</div>
+    </div>
 
     <div class="pane" id="pane-send">
       <label>收件人</label>
@@ -363,6 +386,18 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
         对方打开后只能看见自己那一国，切不了国家。
       </div>
       <div id="linksOut"></div>
+
+      <label style="margin-top:22px">观战（只看 + 发言，碰不到任何座位）</label>
+      <div class="row">
+        <div><button class="btn ghost" id="btnWatchLink">生成观战链接</button></div>
+        <div><button class="btn ghost" id="btnWatchRotate">换一把观战码</button></div>
+      </div>
+      <div class="hint" id="watchAdminHint">
+        观战链接只给「看局面 + 在观战频道发言」两件事：拿不到任何座位令牌，也看不到任何私信。
+        谁拿到链接都能发言，转发范围请自己控制；发现码流到公开渠道就点「换一把」，旧链接立刻失效。
+      </div>
+      <div id="watchLinkOut"></div>
+
       <label style="margin-top:22px">对局控制</label>
       <div class="row">
         <div><button class="btn ghost" id="btnPause">暂停 / 继续</button></div>
@@ -378,10 +413,12 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 <script>
 const POWERS=[["AUSTRIA","奥地利","a"],["ENGLAND","英国","e"],["FRANCE","法国","f"],["GERMANY","德国","g"],["ITALY","意大利","i"],["RUSSIA","俄国","r"],["TURKEY","土耳其","t"]];
 const NAME=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
-const KEY="dw.prefs.v1", BOUND="dw.bound.v1";
+const KEY="dw.prefs.v1", BOUND="dw.bound.v1", WATCH="dw.watch.v1", WNAME="dw.wname.v1";
 let tokens={}, seat="ITALY", timer=null, busy=false, adminKey="";
 let es=null, pushT=null, sseOk=false;
 let bound=null, lastState=null, deadlineAt=0;
+// role: admin（持全部令牌，热座/房主）| player（单人单链接）| viewer（观战，只读+发言）
+let role="admin", watchKey="", watchMessages=[], watchLast=0;
 
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
@@ -392,6 +429,7 @@ async function api(path,opt={}){
   const h=Object.assign({},opt.headers||{});
   if(tokens[seat]) h["X-Seat-Token"]=tokens[seat];
   if(adminKey) h["X-Admin-Key"]=adminKey;
+  if(watchKey) h["X-Spectate-Key"]=watchKey;
   if(opt.body) h["Content-Type"]="application/json";
   const r=await fetch(path,Object.assign({},opt,{headers:h}));
   const txt=await r.text();
@@ -442,6 +480,20 @@ function pickBound(){
   applyBound();
 }
 
+// ---- 观战链接：/?watch=<码>，只给「能在频道里发言」，不给任何座位 ----
+// 和座位链接一样，取走后立刻从地址栏抹掉：观战码被截图带出去，就等于发言权被带出去。
+function takeWatchLink(){
+  const q=new URLSearchParams(location.search||"");
+  const w=q.get("watch")||"";
+  if(w){
+    watchKey=w;
+    localStorage.setItem(WATCH,w);
+    history.replaceState(null,"",location.pathname+(location.hash||""));
+  }else{
+    watchKey=localStorage.getItem(WATCH)||"";
+  }
+}
+
 function applyBound(){
   $("#boundTag").textContent="已绑定："+NAME[bound.power];
   $("#boundTag").classList.remove("hidden");
@@ -452,6 +504,43 @@ function applyBound(){
   ["#pane-llm","#pane-admin"].forEach(sel=>$(sel).classList.add("hidden"));
   if(location.hash==="#llm"||location.hash==="#admin") document.querySelector('[data-tab="brief"]').click();
   $("#banner").textContent="你是"+NAME[bound.power]+"：只持有本国令牌，别国的私信看不到，也切不过去。";
+}
+
+// ---- 观战模式：没有座位、也没有管理权限时落到这里 ----
+// 能被拔掉的都拔掉，而不是「点了弹 403」：一个观战者本来就不该看到「提交军令」这个按钮，
+// 让他点一下再失败，只会让他以为页面坏了。
+const VIEWER_GONE=["send","orders","inbox","llm","admin"];
+
+// 三档角色共用一套「哪些标签该消失」的规则，集中一处，免得改一档漏一档。
+function applyRole(){
+  const viewer=role==="viewer", player=role==="player";
+  const gone=viewer?VIEWER_GONE:(player?["llm","admin"]:[]);
+  document.querySelectorAll(".tabs button").forEach(b=>{
+    b.classList.toggle("hidden",gone.includes(b.dataset.tab));
+  });
+  ["send","orders","inbox","llm","admin"].forEach(t=>{
+    $("#pane-"+t)?.classList.toggle("hidden",gone.includes(t));
+  });
+  $("#btnNew").classList.toggle("hidden",viewer||player);
+  const briefTab=document.querySelector('[data-tab="brief"]');
+  if(briefTab) briefTab.textContent=viewer?"战况":"简报";
+}
+
+function applyViewer(h){
+  role="viewer";
+  seat="";                      // 没有座位：不选国家、也不发 X-Seat-Token
+  applyRole();
+  // 设了管理密钥时要把输入框留着：观战页面正是房主第一次进来配密钥的地方，
+  // 把它藏了会出现「提示要密钥但没有地方填」的死角。
+  const canKey=!!(h&&h.admin_required);
+  $("#adminKey").classList.toggle("hidden",!canKey);
+  $("#banner").classList.remove("hidden");
+  $("#banner").textContent=canKey
+    ? "观战模式：局面与结算公开。房主设了管理密钥——在右上角填入即可建局。"
+    : "观战模式：局面与结算公开，交令与私信一概碰不到。"
+      +(watchKey?"你持有观战码，可以在「观战」里发言。":"要发言需要一个观战码。");
+  const cur=(location.hash||"").replace("#","");
+  if(VIEWER_GONE.includes(cur)) document.querySelector('[data-tab="brief"]')?.click();
 }
 
 $("#btnUnbind").onclick=()=>{
@@ -481,6 +570,7 @@ function renderSeats(st){
     </div>`;
   }).join("");
   el.querySelectorAll(".seat").forEach(e=>{
+    if(role==="viewer"){ e.classList.add("locked"); e.title="观战者不能切国家"; return; }
     if(bound&&e.dataset.p!==bound.power){ e.classList.add("locked"); e.title="该座位由其他人操作"; return; }
     e.onclick=()=>{seat=e.dataset.p;save();renderSeats(st);refresh();};
   });
@@ -500,14 +590,84 @@ function renderBrief(text){
   }).join("");
 }
 
+// ---- 观战频道 ----
+// 增量拉取：带 after=<lastId> 只取新的，避免每 5 秒重绘整屏把正在看的那行顶走。
+function renderWatch(){
+  const el=$("#watchList");
+  if(!watchMessages.length){ el.innerHTML='<div class="empty">还没有人说话。</div>'; return; }
+  el.innerHTML=watchMessages.map(m=>
+    `<div class="cm"><span class="who">${esc(m.name)}</span><span class="at">${esc(m.at||"")}`
+    + `${m.phase?" · "+esc(m.phase):""}</span><div>${esc(m.text)}</div></div>`
+  ).join("");
+  el.scrollTop=el.scrollHeight;
+}
+
+async function loadWatch(reset){
+  try{
+    const d=await api("/api/spectate?after="+(reset?0:watchLast));
+    if(reset){ watchMessages=[]; watchLast=0; }
+    if(d.messages&&d.messages.length){
+      watchMessages=watchMessages.concat(d.messages);
+      watchLast=d.messages[d.messages.length-1].id;
+      renderWatch();
+    }else if(reset){ renderWatch(); }
+    // 不在这里自己开定时器：refresh() 已经在轮询，两套计时只会让请求翻倍
+    const tip=$("#watchTip"), btn=$("#btnSay");
+    btn.classList.toggle("hidden",!d.can_say);
+    tip.classList.toggle("hidden",!!d.can_say);
+    if(d.can_say){
+      $("#watchHead").textContent="观战频道：你可以发言。";
+      $("#btnWatchKey").classList.add("hidden");
+      $("#watchKey").classList.add("hidden");
+    }else{
+      $("#watchHead").textContent=d.has_key
+        ? "观战频道：房主已开放发言，填观战码即可参与。"
+        : "观战频道：房主还没生成观战码，现在只能看。";
+      $("#btnWatchKey").classList.remove("hidden");
+      tip.textContent=d.has_key
+        ? "只能看：要发言请填房主发的观战码（链接形如 /?watch=…）。"
+        : "只能看：房主还没生成观战码（在「管理」页生成一条观战链接）。";
+    }
+  }catch(e){ /* 频道是次要功能，拉不到不该弹条打断对局 */ }
+}
+
+$("#watchText").oninput=()=>{ $("#watchCount").textContent=$("#watchText").value.length; };
+$("#watchText").onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); $("#btnSay").click(); } };
+$("#watchName").value=localStorage.getItem(WNAME)||"";
+
+$("#btnSay").onclick=async()=>{
+  const text=$("#watchText").value.trim();
+  if(!text) return;
+  const name=$("#watchName").value.trim();
+  try{
+    const d=await api("/api/spectate",{method:"POST",body:JSON.stringify({name,text})});
+    $("#watchText").value=""; $("#watchCount").textContent="0";
+    localStorage.setItem(WNAME,name);
+    watchMessages.push(d.message); watchLast=d.message.id; renderWatch();
+  }catch(e){ toast(e.message,"err"); }
+};
+
+$("#btnWatchKey").onclick=async()=>{
+  const box=$("#watchKey");
+  if(box.classList.contains("hidden")){ box.classList.remove("hidden"); box.focus(); return; }
+  const code=box.value.trim();
+  if(!code) return;
+  watchKey=code;
+  localStorage.setItem(WATCH,code);
+  box.value=""; box.classList.add("hidden");
+  await loadWatch(true);
+  toast("观战码已保存，可以发言了","ok");
+};
+
 let lastErr="";
 
-// 未设管理密钥 + 监听在非回环地址 = /api/match 会把 7 个令牌发给任何访问者。
-// 只在「确实危险」时出现；收起状态记在 localStorage，刷新不会反复弹。
+// 「没设管理密钥 + 对外监听」= 管理面被锁死（建局/重置/发令牌/改模型全 403）。
+// 这时服务本身还在跑、局面也能看，只是没人管得了——所以是告警而不是停机。
+// 收起状态记在 localStorage，刷新不会反复弹。
 const WARNMINI="dw.warn.mini";
 function renderWarn(h){
   const el=$("#warn");
-  const risky=!!(h && h.admin_required===false && h.exposed);
+  const risky=!!(h && h.admin_locked);
   el.classList.toggle("hidden",!risky);
   if(risky) el.classList.toggle("mini",localStorage.getItem(WARNMINI)==="1");
 }
@@ -522,6 +682,34 @@ function phaseText(st){
 
 async function refresh(){
   if(busy) return;
+  if(role==="viewer"){
+    // 观众走的是「公开三件套」：局面快照 + 公开结算 + 公开复盘。
+    // 简报与收件箱都要座位令牌，这里一次都不该发——发了就是 401，还白记一条错误日志。
+    try{
+      const st=await api("/api/state");
+      lastState=st;
+      renderSeats(st);
+      $("#phase").textContent=phaseText(st);
+      setDeadline(st);
+      const h=await api("/api/history");
+      $("#brief").innerHTML=renderBrief(h.text);
+      if($("#pane-map").classList.contains("on")) loadMap();
+      await loadWatch(false);
+      if(st.game_over&&!$("#banner").dataset.over){
+        $("#banner").dataset.over="1";
+        $("#banner").textContent="对局已结束："+(st.result_text||"");
+      }
+      lastErr="";
+    }catch(e){
+      const noMatch=String(e.message||"").includes("还没有开局");
+      $("#phase").textContent=noMatch?"等待房主开局":"连接失败";
+      if(noMatch&&!lastErr){
+        $("#brief").innerHTML='<div class="ln h2">对局还没开始</div>'
+          +'<div class="ln">房主开局后，这一页会自动开始显示战况。</div>';
+      }else if(e.message!==lastErr){ toast(e.message,"err"); lastErr=e.message; }
+    }
+    return;
+  }
   if(!tokens[seat]){
     // 还没建局（多半是等管理密钥）：把空状态画出来，别让页面看着像坏了
     renderSeats(null);
@@ -538,6 +726,7 @@ async function refresh(){
     $("#brief").innerHTML=renderBrief(b.text);
     // 地图开着就跟着刷新：部队会动、中心会易主，用户看不到「图是上一阶段的」
     if($("#pane-map").classList.contains("on")) loadMap();
+    if($("#pane-watch").classList.contains("on")) loadWatch(false);
     if(st.game_over){
       $("#banner").classList.remove("hidden");
       $("#banner").textContent="对局已结束："+(st.result_text||"")
@@ -615,32 +804,44 @@ setInterval(()=>{
 },1000);
 
 async function boot(){
-  load();
-  pickBound();
+  load(); takeWatchLink(); pickBound();
+  role=bound?"player":"admin";
+  applyRole();
+  if(bound) applyBound();
   try{
     const h=await api("/healthz");
     if(!bound){
       // 绑定座位的玩家不建局、不取令牌：他手里那一个就够了
-      renderWarn(h);
       if(h.admin_required) showAdmin(false);
-      const d=await api("/api/match",{method:"POST"});
-      tokens=d.tokens;
-      if(!tokens[seat]) seat="ITALY";
-      save();
-      renderSeats(d.summary);
-      $("#adminKey").classList.remove("bad");
-      await loadLlm();
+      try{
+        const d=await api("/api/match",{method:"POST"});
+        tokens=d.tokens;
+        if(!tokens[seat]) seat="ITALY";
+        role="admin"; applyRole();
+        save();
+        renderSeats(d.summary);
+        renderWarn(h);
+        $("#adminKey").classList.remove("bad");
+        await loadLlm();
+      }catch(e){
+        // 建不了局只有三种原因：没设密钥、对外监听被锁、密钥不对。
+        // 三种都不该让页面白屏——落到观战模式，局面照样看得见，房主也能补密钥。
+        const msg=String(e.message||"");
+        applyViewer(h);
+        if(h.admin_locked) renderWarn(h);
+        else if(!(msg.includes("管理员密钥"))) toast("观战模式："+msg,"err");
+      }
     }
     await refresh();
   }catch(e){
     const needKey=String(e.message||"").includes("管理员密钥");
     toast(needKey ? "需要管理密钥：请在右上角输入后按回车"
-        : (bound ? "连不上服务："+e.message : "建局失败："+e.message),"err");
+        : (bound ? "连不上服务："+e.message : "连不上服务："+e.message),"err");
     $("#phase").textContent=needKey?"等待管理密钥":"连接失败";
     $("#brief").innerHTML='<div class="ln h2">尚未开局</div><div class="ln">'
       + (needKey
           ? "本服务已启用管理员密钥：在右上角输入后按回车即可开局。"
-          : "服务端未创建对局，请点右上「新局」。")
+          : "服务还没启动或对局未创建。")
       + "</div>";
     renderSeats(null);
   }
@@ -655,6 +856,7 @@ document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==="llm") loadLlm();
   if(b.dataset.tab==="replay") loadReplay();
   if(b.dataset.tab==="map") loadMap();
+  if(b.dataset.tab==="watch") loadWatch(true);
 });
 (function initTab(){
   const want=(location.hash||"").replace("#","");
@@ -1134,6 +1336,29 @@ $("#btnLinks").onclick=async()=>{
         catch(e){ toast("浏览器不允许写剪贴板，请手动选中复制","err"); }
       };
     });
+  }catch(e){ toast(e.message,"err"); }
+};
+
+// ---- 观战链接：只给「看 + 发言」，不带任何座位令牌 ----
+$("#btnWatchLink").onclick=async()=>{
+  try{
+    const d=await api("/api/spectate/key");
+    $("#watchLinkOut").innerHTML=`<div class="linkrow"><span class="nm">观战</span>`
+      +`<code>${esc(d.link)}</code><button id="copyWatch">复制</button></div>`;
+    $("#copyWatch").onclick=async()=>{
+      try{ await navigator.clipboard.writeText(d.link); toast("观战链接已复制","ok"); }
+      catch(e){ toast("浏览器不允许写剪贴板，请手动选中复制","err"); }
+    };
+  }catch(e){ toast(e.message,"err"); }
+};
+
+$("#btnWatchRotate").onclick=async()=>{
+  if(!confirm("换码后，已经发出去的观战链接全部失效"
+    +"（观众仍能继续看，只是不能再发言）。确定？")) return;
+  try{
+    await api("/api/spectate/rotate",{method:"POST"});
+    $("#watchLinkOut").innerHTML="";
+    toast("观战码已更换，旧链接已失效","ok");
   }catch(e){ toast(e.message,"err"); }
 };
 
