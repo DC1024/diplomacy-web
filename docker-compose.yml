@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    image: diplomacy-web:dev
+    container_name: diplomacy-web
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      DATA_DIR: /data
+      LOG_LEVEL: info
+    restart: unless-stopped

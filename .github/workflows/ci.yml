@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: 安装依赖
+        run: pip install -r requirements-dev.txt
+      - name: 静态检查
+        run: ruff check .
+      - name: 单元测试
+        run: pytest -q
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: diplomacy-web:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: 容器冒烟
+        run: |
+          docker run -d --name dw -p 8080:8080 diplomacy-web:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          echo "--- healthz ---"
+          curl -fsS http://127.0.0.1:8080/healthz
+          echo
+          echo "--- 建局 ---"
+          curl -fsS -X POST http://127.0.0.1:8080/api/match \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['tokens'])==7, d; print('7 seats ok, phase', d['phase'])"
+      - name: 失败时打印容器日志
+        if: failure()
+        run: docker logs dw || true
+      - name: 清理
+        if: always()
+        run: docker rm -f dw || true
