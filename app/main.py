@@ -12,6 +12,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -99,7 +100,9 @@ def seat(a: Arena, token: str | None) -> str:
     try:
         return a.identity(token)
     except PermissionError:
-        raise HTTPException(403, "座位令牌无效") from None
+        # 轮换之后会走到这里。不能只说「无效」——玩家会以为是页面坏了，
+        # 反复刷新；要指明「钥匙换过了，去要新的」。
+        raise HTTPException(403, "座位令牌无效或已被轮换：请向房主索取新链接") from None
 
 
 def require_admin(key: str | None) -> None:
@@ -280,6 +283,13 @@ class ResetReq(BaseModel):
     confirm: bool = False
 
 
+class RotateReq(BaseModel):
+    powers: list[str] = Field(
+        default_factory=list,
+        description="要换令牌的国家（如 [\"FRANCE\"]）；留空 = 七个全换",
+    )
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     """探活。exposed 说「外面连得上」，admin_locked 说「连得上但没人管得了」。"""
@@ -325,6 +335,39 @@ def make_links(request: Request, x_admin_key: Annotated[str | None, Header()] = 
         links={p: f"{base}/?seat={p}&t={a.data['tokens'][p]}" for p in POWERS},
         spectate=f"{base}/?watch={SPECTATE.code()}",
         notice=None,
+    )
+
+
+@app.post("/api/links/rotate")
+def rotate_links(request: Request,
+                 req: RotateReq | None = None,
+                 x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """换座位令牌，旧链接立刻失效，返回新链接。
+
+    补的是「链接被转发出去」这个洞：以前只能开新局（连棋盘一起丢）才换得掉令牌，
+    现在只换令牌，存档里其它字段一个不动——棋照走，观众照看，只有那几把旧钥匙作废。
+
+    刻意做成**替换**而不是「再加一把」：`tokens` 里每个国家只留一把，换就是让旧的死。
+    否则「转发过的链接还能用」这条根本没堵上，只是多了一把新钥匙。
+    """
+    require_admin(x_admin_key)
+    a = require_arena()
+    wanted = [p.strip().upper() for p in (req.powers if req else []) if p.strip()]
+    unknown = [p for p in wanted if p not in POWERS]
+    if unknown:
+        raise HTTPException(400, f"不认识的国家：{'、'.join(unknown)}；可选 {'、'.join(POWERS)}")
+    rotated = list(dict.fromkeys(wanted)) or list(POWERS)
+    with a.lock:
+        for p in rotated:
+            a.data["tokens"][p] = secrets.token_urlsafe(32)
+        a.save()
+        a.bump()            # 让轮询中的页面发现「有变化」，而不是继续拿死令牌去撞
+        fresh = {p: a.data["tokens"][p] for p in rotated}
+    base = str(request.base_url).rstrip("/")
+    return dict(
+        rotated=rotated,
+        links={p: f"{base}/?seat={p}&t={t}" for p, t in fresh.items()},
+        spectate=f"{base}/?watch={SPECTATE.code()}",
     )
 
 

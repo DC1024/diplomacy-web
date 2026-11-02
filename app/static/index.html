@@ -127,8 +127,19 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 .mapbar .hint{margin:0;flex:1;min-width:0}
 .mapbar .btn{margin:0;flex-shrink:0}
 .mapbody{flex:1;min-height:0;display:flex;gap:8px}
-.mapwrap{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;background:var(--map-bg);overflow:hidden}
+/* touch-action:none —— 手指按在地图上就是「拖地图」，不滚页面。
+   触摸屏上没有这个的话，一拖就把页面连同地图一起滚走。 */
+.mapwrap{position:relative;flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;background:var(--map-bg);overflow:hidden;touch-action:none;user-select:none;cursor:grab}
 .mapwrap svg{display:block;width:100%;height:100%}
+.mapwrap.dragging{cursor:grabbing}
+.mapwrap.dragging svg{cursor:grabbing}
+/* 缩放按钮压在地图右上角：小屏上这是唯一确定的放大入口（双指缩放不做，见脚本里的说明） */
+#mapZoom{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:6px;z-index:2}
+#mapZoom button{width:34px;height:34px;padding:0;border-radius:7px;border:1px solid var(--line);
+  background:var(--panel);color:var(--text);font:600 15px/1 system-ui,sans-serif;cursor:pointer;
+  box-shadow:0 1px 4px rgba(0,0,0,.12)}
+#mapZoom button:hover{border-color:var(--accent);color:var(--accent)}
+#mapZoom button:active{transform:translateY(1px)}
 .mapside{width:250px;flex-shrink:0;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px}
 .mapside .hint{margin:0 0 8px}
 .chiprow{display:flex;flex-wrap:wrap;gap:6px}
@@ -183,7 +194,21 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 .chat .cm .who{color:var(--accent);font-weight:600}
 .chat .cm .at{color:var(--muted);font-size:11px;margin-left:7px;font-variant-numeric:tabular-nums}
 .chat .empty{color:var(--muted);font-size:13px}
-@media(max-width:700px){aside{width:100%;border-right:none;border-bottom:1px solid var(--line);max-height:150px}main{flex-direction:column}}
+@media(max-width:700px){
+  aside{width:100%;border-right:none;border-bottom:1px solid var(--line);max-height:150px}
+  main{flex-direction:column}
+  /* 页签九个，窄屏一行放不下。换行比横向滚动好找——藏起来的那几个等于不存在 */
+  .tabs{flex-wrap:wrap;padding:6px 8px 0}
+  .tabs button{padding:7px 9px}
+  /* 地图页：侧栏挪到图下方整行铺开，图给足高度，点部队才点得准 */
+  .mapbody{flex-direction:column}
+  .mapwrap{min-height:46vh}
+  .mapside{width:auto;max-height:32vh}
+  /* 手指比鼠标粗一倍：chip 与缩放按钮都要有像样的点击面积 */
+  .chip{padding:8px 12px;font-size:13px}
+  #mapZoom button{width:40px;height:40px;font-size:17px}
+  .pane{padding:10px 10px}
+}
 </style>
 </head>
 <body>
@@ -263,7 +288,13 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
         <button class="btn ghost" id="btnMapOrders">去交军令</button>
       </div>
       <div class="mapbody">
-        <div class="mapwrap"><svg id="mapSvg" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="mapwrap"><svg id="mapSvg" preserveAspectRatio="xMidYMid meet"></svg>
+          <div id="mapZoom">
+            <button id="btnZoomIn" title="放大（滚轮也行）" aria-label="放大">＋</button>
+            <button id="btnZoomOut" title="缩小" aria-label="缩小">－</button>
+            <button id="btnZoomReset" title="复位到全图" aria-label="复位">⤢</button>
+          </div>
+        </div>
         <div class="mapside">
           <div class="hint" id="mapSel">还没有选中部队。带圆点的是补给中心，填充色是归属国。</div>
           <div class="chiprow" id="mapActs"></div>
@@ -380,10 +411,15 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 
     <div class="pane" id="pane-admin">
       <label>分发座位（一人一条，各自只看得到自己那国）</label>
-      <button class="btn ghost" id="btnLinks">生成 7 条座位链接</button>
+      <div class="row">
+        <div><button class="btn ghost" id="btnLinks">生成 7 条座位链接</button></div>
+        <div><button class="btn ghost" id="btnRotate">换掉全部令牌</button></div>
+      </div>
       <div class="hint" id="linkHint">
         把每条链接单独发给对应的玩家。链接里带着该国令牌——谁拿到就等于拿到该国的私信和交令权，<b>不要群发</b>。
         对方打开后只能看见自己那一国，切不了国家。
+        <br>链接已经流到群里、或者某个人的链接不该再能用时，点「换掉全部令牌」：七把钥匙同时作废，
+        棋盘、私信、观众和模型座位都不受影响，只是要把新链接重新发一遍。
       </div>
       <div id="linksOut"></div>
 
@@ -419,6 +455,12 @@ let es=null, pushT=null, sseOk=false;
 let bound=null, lastState=null, deadlineAt=0;
 // role: admin（持全部令牌，热座/房主）| player（单人单链接）| viewer（观战，只读+发言）
 let role="admin", watchKey="", watchMessages=[], watchLast=0;
+// 令牌被房主轮换掉的标记：一次就够，之后整页降级成围观 + 一条说明，
+// 不再每 5 秒去撞一次 403、也不再让军令页签挂在外面等人点。
+let tokenDead=false;
+// 最近一次 /healthz：降级成观众时要用它决定「要不要留着管理密钥输入框」，
+// 而那一刻手上没有 healthz 的返回值
+let health=null;
 
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
@@ -526,19 +568,22 @@ function applyRole(){
   if(briefTab) briefTab.textContent=viewer?"战况":"简报";
 }
 
-function applyViewer(h){
+function applyViewer(h, why){
   role="viewer";
-  seat="";                      // 没有座位：不选国家、也不发 X-Seat-Token
+  seat="";
+  // 观众**一把座位令牌都不该带**：带着死令牌去请求，每条公开接口都会变成 403，
+  // 页头就会显示「连接失败」——而其实连得上，只是多带了一把作废的钥匙。
+  tokens={};
   applyRole();
   // 设了管理密钥时要把输入框留着：观战页面正是房主第一次进来配密钥的地方，
   // 把它藏了会出现「提示要密钥但没有地方填」的死角。
   const canKey=!!(h&&h.admin_required);
   $("#adminKey").classList.toggle("hidden",!canKey);
   $("#banner").classList.remove("hidden");
-  $("#banner").textContent=canKey
+  $("#banner").textContent=why || (canKey
     ? "观战模式：局面与结算公开。房主设了管理密钥——在右上角填入即可建局。"
     : "观战模式：局面与结算公开，交令与私信一概碰不到。"
-      +(watchKey?"你持有观战码，可以在「观战」里发言。":"要发言需要一个观战码。");
+      +(watchKey?"你持有观战码，可以在「观战」里发言。":"要发言需要一个观战码。"));
   const cur=(location.hash||"").replace("#","");
   if(VIEWER_GONE.includes(cur)) document.querySelector('[data-tab="brief"]')?.click();
 }
@@ -735,7 +780,34 @@ async function refresh(){
     }
     lastErr="";
   }catch(e){
-    const noMatch=String(e.message||"").includes("还没有开局");
+    const msg=String(e.message||"");
+    if(msg.includes("已被轮换")||msg.includes("令牌无效")){
+      if(role==="admin"){
+        // 热座模式下房主自己也可能握着旧令牌（在另一个标签页/另一台机器上换了钥匙）。
+        // 管理面随时能拿到当前令牌，重新同步一次就好——把自己踢成观众纯属自伤。
+        try{
+          const d=await api("/api/match",{method:"POST"});
+          tokens=d.tokens;
+          if(!tokens[seat]) seat="ITALY";
+          save();
+          toast("令牌已更新，已重新同步座位","ok");
+          return;
+        }catch(e2){ /* 同步不了就落到下面当观众 */ }
+      }
+      // 观众化是诚实的降级：局面还看得见，但必须说清「钥匙作废了，去要新的」，
+      // 说成「连接失败」只会让人一直刷新。
+      tokenDead=true; bound=null;
+      localStorage.removeItem(BOUND);
+      // 「已绑定：法国」的牌子留着会骗人——那顶帽子已经没了
+      $("#boundTag").classList.add("hidden");
+      $("#btnUnbind").classList.add("hidden");
+      applyViewer(health,"这条座位链接已作废（房主换过令牌）。"
+        +"请向房主要一条新链接；在此期间你可以先围观。");
+      deadlineAt=0;
+      if(msg!==lastErr){ toast(msg,"err"); lastErr=msg; }
+      return;
+    }
+    const noMatch=msg.includes("还没有开局");
     $("#phase").textContent=noMatch?"等待房主开局":"连接失败";
     if(noMatch){
       $("#brief").innerHTML='<div class="ln h2">对局还没开始</div><div class="ln">等房主开局后刷新本页即可。</div>';
@@ -810,6 +882,7 @@ async function boot(){
   if(bound) applyBound();
   try{
     const h=await api("/healthz");
+    health=h;
     if(!bound){
       // 绑定座位的玩家不建局、不取令牌：他手里那一个就够了
       if(h.admin_required) showAdmin(false);
@@ -960,6 +1033,9 @@ const POWER_TAG=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
 // 标签是三个大写字母、字号 21：半宽约 0.62em×3/2 ≈ 20，半高约 8（基线在字形底部）
 const LABEL_DX=20, LABEL_DY=8;
 let geo=null, bd=null, sel=null;
+// 窄屏上「选中部队」之后要滚动一次，好让动作面板进视野；但 renderActs 每轮刷新都会跑，
+// 记一下上次滚到哪个选择，避免每 5 秒把页面拽一下
+let actsScrolled="";
 
 const unitAt=base=>(bd&&bd.units||[]).find(u=>u.at===base);
 const myUnitAt=base=>{const u=unitAt(base);return u&&bd&&u.power===bd.power?u:null;};
@@ -1023,12 +1099,73 @@ function fillOf(code){
   return a.sc?pal.neutralSC:pal.neutral;
 }
 
+// ---- 缩放 / 拖动 ----
+// 变换只走 viewBox。drawMap 每次都重建 innerHTML，把 transform 挂在 <g> 上会被一并擦掉；
+// viewBox 是 <svg> 自己的属性，重绘不碰它，缩放状态因此能活过每一次刷新。
+// 不做双指缩放：那要自己算两指中点与距离，而在小屏上「＋」按钮已经够用。
+const ZOOM_MIN=1, ZOOM_MAX=8;
+let mapZoom=1, mapPan={x:0, y:0};
+
+function baseBox(){
+  const b=(geo&&geo.viewBox)||[0,0,1835,1360];
+  return [b[0], b[1], b[2], b[3]];
+}
+
+function applyBox(){
+  const svg=$("#mapSvg");
+  if(!svg) return;
+  const [x,y,w,h]=baseBox();
+  const bw=w/mapZoom, bh=h/mapZoom;
+  // 夹住平移：全图时不该能拖动（否则会拖出一片空白），放大后也不许拖出图外
+  const limX=Math.max(0,(w-bw)/2), limY=Math.max(0,(h-bh)/2);
+  mapPan.x=Math.max(-limX, Math.min(limX, mapPan.x));
+  mapPan.y=Math.max(-limY, Math.min(limY, mapPan.y));
+  const cx=x+w/2+mapPan.x, cy=y+h/2+mapPan.y;
+  svg.setAttribute("viewBox",[cx-bw/2, cy-bh/2, bw, bh].map(v=>+v.toFixed(2)).join(" "));
+}
+
+// 当前 1 个 viewBox 单位等于几个屏幕像素
+function mapScale(){
+  const svg=$("#mapSvg"), r=svg.getBoundingClientRect();
+  const vb=(svg.getAttribute("viewBox")||"0 0 1 1").split(/\s+/).map(Number);
+  if(!r.width||!r.height||!vb[2]||!vb[3]) return 0;
+  return Math.min(r.width/vb[2], r.height/vb[3]);
+}
+
+// 屏幕坐标 → viewBox 坐标。`preserveAspectRatio="meet"` 会把内容居中留边，
+// 所以不能拿 rect 宽高直接除，得先还原内容在框里的实际尺寸。
+function svgPoint(clientX, clientY){
+  const svg=$("#mapSvg"), r=svg.getBoundingClientRect();
+  const [vx,vy,vw,vh]=(svg.getAttribute("viewBox")||"0 0 1 1").split(/\s+/).map(Number);
+  const s=Math.min(r.width/vw, r.height/vh)||1;
+  const ox=r.left+(r.width-vw*s)/2, oy=r.top+(r.height-vh*s)/2;
+  return [vx+(clientX-ox)/s, vy+(clientY-oy)/s];
+}
+
+// 以指针所在点为锚缩放：那个点在图上的位置保持不动。
+// 锚点到中心的距离按 1/zoom 收缩，故 新中心 = 锚点 + (旧中心 − 锚点) × 旧zoom/新zoom
+function zoomAt(factor, clientX, clientY){
+  const z=Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, mapZoom*factor));
+  if(Math.abs(z-mapZoom)<1e-6) return;
+  const [x,y,w,h]=baseBox();
+  const cx=x+w/2+mapPan.x, cy=y+h/2+mapPan.y;
+  const [px,py]=(clientX==null)?[cx,cy]:svgPoint(clientX,clientY);
+  const k=mapZoom/z;
+  mapPan.x=px+(cx-px)*k-(x+w/2);
+  mapPan.y=py+(cy-py)*k-(y+h/2);
+  mapZoom=z;
+  applyBox();
+}
+
+function resetZoom(){ mapZoom=1; mapPan={x:0,y:0}; applyBox(); }
+
 function drawMap(){
   const svg=$("#mapSvg");
   if(!geo){ svg.innerHTML=""; return; }
-  // 取景按内容包围盒（`[x, y, w, h]`），不是文件里声明的 0 0 1835 1360——那个框会把
-  // 突尼斯、那不勒斯半截切掉，左边还空一片
-  svg.setAttribute("viewBox",(geo.viewBox||[0,0,1835,1360]).join(" "));
+  // 取景交给 applyBox()：基准是内容包围盒（`[x, y, w, h]`），不是文件里声明的
+  // 0 0 1835 1360——那个框会把突尼斯、那不勒斯半截切掉，左边还空一片。
+  // 缩放与平移也叠在这个函数里，所以重绘之后视野不会被弹回全图。
+  applyBox();
   const dests=new Set();
   if(sel) ordersOf(sel).forEach(o=>{const d=destOf(o); if(d) dests.add(d);});
   // 文本框里已经写了的令，用一圈金色描边标出来——点了没反应最让人困惑
@@ -1089,6 +1226,13 @@ function renderActs(){
     +`${esc(orderChip(o).label)}</button>`).join("")
     ||'<span class="hint">这支部队本阶段没有可下的令。</span>';
   box.querySelectorAll(".chip").forEach(b=>b.onclick=()=>applyOrder(list[+b.dataset.i]));
+  // 小屏上图占满一屏，动作面板在折叠线以下：选中部队若不把它滚进来，用户会以为「点了没反应」。
+  // 只在选择变化时滚一次——renderActs 每轮刷新都会跑，每次都滚等于页面自己在抖。
+  const key=(sel.kind||"B")+"@"+sel.at;
+  if(key!==actsScrolled&&window.matchMedia("(max-width:700px)").matches){
+    actsScrolled=key;
+    box.scrollIntoView({block:"nearest", behavior:"smooth"});
+  }
 }
 
 function applyOrder(order){
@@ -1129,6 +1273,8 @@ async function loadMap(){
 }
 
 $("#mapSvg").onclick=e=>{
+  // 刚拖完的那一下是拖动，不是点选：否则每次平移都会顺手选一个省
+  if(performance.now()-draggedAt<250) return;
   const loc=e.target&&e.target.dataset&&e.target.dataset.loc;
   if(!loc||!bd) return;
   const there=unitAt(loc);
@@ -1148,6 +1294,54 @@ $("#mapSvg").onclick=e=>{
   }
 };
 $("#btnMapOrders").onclick=()=>document.querySelector('[data-tab="orders"]').click();
+
+// ---- 滚轮缩放 / 拖动平移 ----
+// 刻意**不用** setPointerCapture：捕获之后 pointerup 的 target 变成容器，
+// 浏览器据此把 click 派发给容器，省份就点不中了（试过，整张图不再响应点选）。
+// 改成拖动期间在 window 上挂监听，pointerup 仍落在原来那个省份上。
+const mapEl=document.querySelector(".mapwrap");
+let drag=null, draggedAt=0;
+
+mapEl.addEventListener("wheel",e=>{
+  if(!geo) return;
+  e.preventDefault();                       // 不拦的话整页会跟着滚
+  zoomAt(e.deltaY<0?1.18:1/1.18, e.clientX, e.clientY);
+},{passive:false});
+
+mapEl.addEventListener("pointerdown",e=>{
+  if(e.target.closest("#mapZoom")||!geo||e.button!==0) return;
+  drag={id:e.pointerId, x:e.clientX, y:e.clientY, pan:{...mapPan}, moved:false};
+  window.addEventListener("pointermove",onDragMove);
+  window.addEventListener("pointerup",endDrag);
+  window.addEventListener("pointercancel",endDrag);
+});
+
+function onDragMove(e){
+  if(!drag||e.pointerId!==drag.id) return;
+  const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+  if(!drag.moved&&Math.abs(dx)+Math.abs(dy)<5) return;   // 手抖不算拖动
+  drag.moved=true;
+  const s=mapScale();
+  if(!s) return;
+  mapPan.x=drag.pan.x-dx/s;                 // 拖多少屏幕像素，除以比例换成图上的距离
+  mapPan.y=drag.pan.y-dy/s;
+  applyBox();
+  mapEl.classList.add("dragging");
+}
+
+function endDrag(e){
+  if(!drag||(e&&e.pointerId!==drag.id)) return;
+  if(drag.moved) draggedAt=performance.now();
+  drag=null;
+  mapEl.classList.remove("dragging");
+  window.removeEventListener("pointermove",onDragMove);
+  window.removeEventListener("pointerup",endDrag);
+  window.removeEventListener("pointercancel",endDrag);
+}
+
+$("#btnZoomIn").onclick=()=>zoomAt(1.4);
+$("#btnZoomOut").onclick=()=>zoomAt(1/1.4);
+$("#btnZoomReset").onclick=()=>{ resetZoom(); toast("已复位到全图"); };
 
 
 // ---------- 模型页签 ----------
@@ -1321,21 +1515,46 @@ $("#btnCtx").onclick=async()=>{
 $("#btnRefresh").onclick=()=>{refresh();toast("已刷新");};
 
 // ---------- 管理页签：分发座位 / 暂停 / 强制结算 ----------
+function renderSeatLinks(links){
+  $("#linksOut").innerHTML=POWERS.filter(([c])=>links[c]).map(([c,n])=>
+    `<div class="linkrow"><span class="nm">${n}</span>`
+    + `<code>${esc(links[c])}</code>`
+    + `<button data-power="${c}">复制</button></div>`).join("");
+  $("#linksOut").querySelectorAll("button[data-power]").forEach(b=>{
+    b.onclick=async()=>{
+      const url=links[b.dataset.power];
+      try{ await navigator.clipboard.writeText(url); toast(NAME[b.dataset.power]+" 的链接已复制","ok"); }
+      catch(e){ toast("浏览器不允许写剪贴板，请手动选中复制","err"); }
+    };
+  });
+}
+
 $("#btnLinks").onclick=async()=>{
   try{
     const d=await api("/api/links",{method:"POST"});
-    if(d.notice) toast(d.notice,"err");
-    $("#linksOut").innerHTML=POWERS.map(([c,n])=>
-      `<div class="linkrow"><span class="nm">${n}</span>`
-      + `<code>${esc(d.links[c])}</code>`
-      + `<button data-power="${c}">复制</button></div>`).join("");
-    $("#linksOut").querySelectorAll("button[data-power]").forEach(b=>{
-      b.onclick=async()=>{
-        const url=d.links[b.dataset.power];
-        try{ await navigator.clipboard.writeText(url); toast(NAME[b.dataset.power]+" 的链接已复制","ok"); }
-        catch(e){ toast("浏览器不允许写剪贴板，请手动选中复制","err"); }
-      };
+    renderSeatLinks(d.links);
+  }catch(e){ toast(e.message,"err"); }
+};
+
+// 换令牌：链接发错地方的补救。说清「会失去什么」，别让人以为这是在刷新链接。
+$("#btnRotate").onclick=async()=>{
+  if(!confirm("换掉全部 7 把座位令牌？\n\n"
+    +"· 已经发出去的座位链接立刻作废，打开的人会看到「令牌已被轮换」\n"
+    +"· 棋盘、私信、观众、模型座位都不受影响，棋照走\n"
+    +"· 换完必须把新链接重新发给每个人")) return;
+  try{
+    const d=await api("/api/links/rotate",{method:"POST"});
+    // 换完必须立刻把新钥匙收进本地：不更新的话，房主自己下一次轮询就拿着刚作废的令牌
+    // 去撞 403，等于被自己的操作踢出管理页。
+    Object.keys(d.links).forEach(p=>{
+      const t=new URLSearchParams(d.links[p].split("?")[1]||"").get("t");
+      if(t) tokens[p]=t;
     });
+    if(!tokens[seat]&&d.rotated.length) seat=d.rotated[0];
+    save();
+    renderSeatLinks(d.links);
+    toast(`已换 ${d.rotated.length} 把，旧链接立即失效`,"ok");
+    refresh();
   }catch(e){ toast(e.message,"err"); }
 };
 

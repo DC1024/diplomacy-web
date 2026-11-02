@@ -83,6 +83,99 @@ def test_links_need_an_existing_match(tmp_path, monkeypatch):
         assert r.status_code == 404
 
 
+# ---------- 换令牌（链接发错群时的补救） ----------
+def token_of(client, ok, power) -> str:
+    return parse_qs(urlparse(client.post("/api/links", headers=ok).json()["links"][power]).query)["t"][0]
+
+
+def test_rotate_kills_the_old_links(tmp_path, monkeypatch):
+    """换完之后旧令牌必须立刻 403，新令牌可用。
+
+    这条是「只换令牌」和「悄悄再加一把」的分水岭：如果旧令牌还能用，
+    转发出去的那条链接就依然是一条后门，轮换只是自己骗自己。
+    """
+    client, main, ok = started(tmp_path, monkeypatch, "k")
+    with client:
+        old = token_of(client, ok, "FRANCE")
+        assert client.get("/api/me", headers={"X-Seat-Token": old}).json()["power"] == "FRANCE"
+
+        d = client.post("/api/links/rotate", headers=ok, json={"powers": ["FRANCE"]}).json()
+        new = parse_qs(urlparse(d["links"]["FRANCE"]).query)["t"][0]
+        assert new != old
+
+        dead = client.get("/api/me", headers={"X-Seat-Token": old})
+        assert dead.status_code == 403
+        # 报错要说清是「换过了」，否则玩家会以为页面坏了，一直刷新
+        assert "轮换" in dead.json()["detail"]
+        assert client.get("/api/me", headers={"X-Seat-Token": new}).json()["power"] == "FRANCE"
+
+
+def test_rotate_one_country_leaves_others_alone(tmp_path, monkeypatch):
+    """只换一国时，其余六国不该被顺手踢下线。"""
+    client, _, ok = started(tmp_path, monkeypatch, "k")
+    with client:
+        keep = {p: token_of(client, ok, p) for p in POWERS if p != "RUSSIA"}
+        client.post("/api/links/rotate", headers=ok, json={"powers": ["RUSSIA"]})
+        for power, tok in keep.items():
+            assert client.get("/api/me", headers={"X-Seat-Token": tok}).json()["power"] == power
+
+
+def test_rotate_all_by_default(tmp_path, monkeypatch):
+    """不传 powers = 七个全换。返回的 links 也只该有七条。"""
+    client, _, ok = started(tmp_path, monkeypatch, "k")
+    with client:
+        olds = {p: token_of(client, ok, p) for p in POWERS}
+        d = client.post("/api/links/rotate", headers=ok).json()
+        assert set(d["rotated"]) == set(POWERS) and set(d["links"]) == set(POWERS)
+        for power, tok in olds.items():
+            got = client.get("/api/me", headers={"X-Seat-Token": tok})
+            assert got.status_code == 403, power
+
+
+def test_rotation_lands_on_disk_and_keeps_the_game(tmp_path, monkeypatch):
+    """换令牌要落盘，且不能把内核存档写坏、不能动棋盘。
+
+    `Arena(path)` 一构造就会校验 `mode == async-v3` 并 `Game.from_dict()`；
+    令牌若被塞进了错误的层级，这里会直接炸——这正是「别往 vendored 结构里塞私货」
+    要防的那类事故。
+    """
+    from app.engine.arena import Arena
+
+    client, main, ok = started(tmp_path, monkeypatch, "k")
+    with client:
+        before = client.get("/api/state").json()
+        tokens = client.post("/api/links/rotate", headers=ok).json()
+        fresh = {p: parse_qs(urlparse(u).query)["t"][0] for p, u in tokens["links"].items()}
+
+        reloaded = Arena(main.STATE_PATH)
+        assert reloaded.data["tokens"] == fresh
+        assert reloaded.game().get_current_phase() == before["phase"]
+        assert {p: len(reloaded.game().get_units(p)) for p in POWERS} == before["units"]
+
+        after = client.get("/api/state").json()
+        assert after["phase"] == before["phase"]
+        assert after["centers"] == before["centers"]
+        assert after["units"] == before["units"]
+
+
+def test_rotation_does_not_kick_the_spectators(tmp_path, monkeypatch):
+    """观众用的是另一把钥匙，换座位令牌不该把围观的人一起赶走。"""
+    client, _, ok = started(tmp_path, monkeypatch, "k")
+    with client:
+        code = client.get("/api/spectate/key", headers=ok).json()["key"]
+        client.post("/api/links/rotate", headers=ok)
+        assert client.get("/api/spectate/key", headers=ok).json()["key"] == code
+        assert client.get("/api/board", headers={"X-Spectate-Key": code}).status_code == 200
+
+
+def test_rotate_needs_admin_and_valid_names(tmp_path, monkeypatch):
+    client, _, ok = started(tmp_path, monkeypatch, "k")
+    with client:
+        assert client.post("/api/links/rotate").status_code == 403
+        bad = client.post("/api/links/rotate", headers=ok, json={"powers": ["ATLANTIS"]})
+        assert bad.status_code == 400 and "ATLANTIS" in bad.json()["detail"]
+
+
 # ---------- 阶段时钟 ----------
 class StubArena:
     def __init__(self, phase="S1901M"):
