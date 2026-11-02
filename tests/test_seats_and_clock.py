@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from fastapi.testclient import TestClient
 
-from app import persist
+from app import i18n, persist
 from app.clock import PhaseClock
 from app.engine.arena import POWERS
 from app.llm import LLMSeat, ScriptedProvider
@@ -494,7 +494,10 @@ def test_seat_token_cannot_read_another_power(tmp_path, monkeypatch):
         for url in ("/api/brief?power=FRANCE", "/api/brief?power=FRANCE&as=FRANCE"):
             d = client.get(url, headers=at).json()
             assert d["power"] == "AUSTRIA", url
-            assert "AUSTRIA" in d["text"].split("\n")[0], url
+            head = d["text"].split("\n")[0]
+            assert i18n.power_name("AUSTRIA") in head, url
+            # 比原来更严：不只是「看得到自己」，而是「看不到冒充的那国」
+            assert i18n.power_name("FRANCE") not in head, url
         # 收件箱也不能借参数换人
         assert client.get("/api/inbox?power=FRANCE", headers=at).status_code == 200
         assert client.get("/api/me", headers=at).json()["power"] == "AUSTRIA"

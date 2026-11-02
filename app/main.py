@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import export as export_mod
+from . import i18n
 from .clock import PhaseClock
 from .engine.arena import POWERS, Arena, OrderError
 from .llm import LLMSeat, SeatRunner, Usage, probe, seatstore
@@ -89,22 +90,32 @@ def arena() -> Arena | None:
         return _arena
 
 
+def _err(status: int, code: str, text: str) -> HTTPException:
+    """带机器码的错误：前端靠 `X-Err` 分支，不再靠中文文案 `includes(...)`。
+
+    双语之前，页面用 `msg.includes("还没有开局")` 判断「是没开局还是真连不上」；
+    一旦简报切英文、错误文案也跟着变，这种判断会静默失效——页面会把「还没开局」
+    显示成「连接失败」，看起来像坏了。码是协议，文案只是给人看的。
+    """
+    return HTTPException(status, text, headers={"X-Err": code})
+
+
 def require_arena() -> Arena:
     a = arena()
     if a is None:
-        raise HTTPException(404, "还没有开局，请先新建对局")
+        raise _err(404, "no_match", "还没有开局，请先新建对局")
     return a
 
 
 def seat(a: Arena, token: str | None) -> str:
     if not token:
-        raise HTTPException(401, "缺少座位令牌")
+        raise _err(401, "no_token", "缺少座位令牌")
     try:
         return a.identity(token)
     except PermissionError:
         # 轮换之后会走到这里。不能只说「无效」——玩家会以为是页面坏了，
         # 反复刷新；要指明「钥匙换过了，去要新的」。
-        raise HTTPException(403, "座位令牌无效或已被轮换：请向房主索取新链接") from None
+        raise _err(403, "bad_token", "座位令牌无效或已被轮换：请向房主索取新链接") from None
 
 
 def require_admin(key: str | None) -> None:
@@ -119,9 +130,9 @@ def require_admin(key: str | None) -> None:
     if is_admin(key):
         return
     if ADMIN_KEY:
-        raise HTTPException(403, "需要管理员密钥：请在页面右上角填写，或传 X-Admin-Key 请求头")
-    raise HTTPException(
-        403,
+        raise _err(403, "admin_key", "需要管理员密钥：请在页面右上角填写，或传 X-Admin-Key 请求头")
+    raise _err(
+        403, "admin_locked",
         "未设置 ADMIN_KEY 且监听在非回环地址：管理面已锁定。"
         "请加 -e ADMIN_KEY=<长随机串> 后重启；只在本机玩就把监听改回 127.0.0.1。",
     )
@@ -154,7 +165,17 @@ def optional_seat(a: Arena, token: str | None) -> str | None:
     return seat(a, token)
 
 
-def summary(a: Arena, st: dict | None = None) -> dict:
+def lang_of(x_lang: str | None) -> str:
+    """`X-Lang` 请求头 → 受支持的语言（`zh` / `en`）。
+
+    为什么不走 `Accept-Language`：那个头由浏览器自动填、前端改不动，而「切到英文」是
+    页面上的一个按钮。用自定义头，前端一处设置，服务端一处读取，两边都不猜。
+    认不出来（含没传）就是中文：默认行为与双语功能上线前完全一致。
+    """
+    return i18n.pick(x_lang)
+
+
+def summary(a: Arena, st: dict | None = None, lang: str = "zh") -> dict:
     st = st if st is not None else a.admin_state()
     game = a.game()
     running = not (st["game_over"] or st["paused"])
@@ -166,7 +187,7 @@ def summary(a: Arena, st: dict | None = None) -> dict:
         paused=st["paused"],
         game_over=st["game_over"],
         result=st["result"],
-        result_text=a.result_text(),
+        result_text=a.result_text(lang),
         centers={p: len(game.get_centers(p)) for p in POWERS},
         units={p: len(game.get_units(p)) for p in POWERS},
         players={p: dict(active=s["active"], required=s["required"], ready=s["ready"])
@@ -409,8 +430,8 @@ def a_ts() -> str:
 
 
 @app.get("/api/state")
-def get_state() -> dict:
-    return summary(require_arena())
+def get_state(x_lang: Annotated[str | None, Header()] = None) -> dict:
+    return summary(require_arena(), lang=lang_of(x_lang))
 
 
 # 等待切片：`admin_wait()` 被 `bump()` 唤醒是**立刻**的，切片只决定两件闲事——
@@ -426,7 +447,7 @@ def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _event_frames():
+def _event_frames(lang: str = "zh"):
     """SSE 帧流：局面一动就推一份公开快照。
 
     刻意只推 `summary()`——里面没有任何座位令牌。客户端拿它当「该刷新了」的信号，
@@ -465,7 +486,7 @@ def _event_frames():
         idle = 0
         last_rev, last_match = st["revision"], st["match_id"]
         try:
-            payload = summary(a, st)
+            payload = summary(a, st, lang)
         except Exception:  # 一场正在收敛的结算不该把连接打断
             log.exception("推送组装失败，跳过这一帧")
             continue
@@ -473,10 +494,15 @@ def _event_frames():
 
 
 @app.get("/api/events")
-def events() -> StreamingResponse:
-    """实时推送（SSE）：结算、暂停、有人交令都会立刻下发，不用等下一轮轮询。"""
+def events(x_lang: Annotated[str | None, Header()] = None,
+           lang: str = Query("", description="等价于 X-Lang；EventSource 设不了请求头")) -> StreamingResponse:
+    """实时推送（SSE）：结算、暂停、有人交令都会立刻下发，不用等下一轮轮询。
+
+    语言从查询串取：`EventSource` 不能自定义请求头，而推送里带着 `result_text`
+    （结束时的那句话）。前端切语言时重开一条流即可。
+    """
     return StreamingResponse(
-        _event_frames(),
+        _event_frames(lang_of(lang or x_lang)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -495,22 +521,25 @@ def me(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
 
 
 @app.get("/api/brief")
-def brief(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
+def brief(x_seat_token: Annotated[str | None, Header()] = None,
+          x_lang: Annotated[str | None, Header()] = None) -> dict:
     a = require_arena()
     power = seat(a, x_seat_token)
+    lang = lang_of(x_lang)
     with a.lock:
-        text = a.brief(power)[0]
+        text = a.brief(power, lang=lang)[0]
     return dict(power=power, text=text, phase=a.game().get_current_phase(),
-                game_over=a.data["stage"] == "done", result_text=a.result_text())
+                game_over=a.data["stage"] == "done", result_text=a.result_text(lang))
 
 
 @app.get("/api/legal")
 def legal(x_seat_token: Annotated[str | None, Header()] = None,
+          x_lang: Annotated[str | None, Header()] = None,
           locs: str = Query("", description="逗号分隔的地点，留空表示全部")) -> dict:
     a = require_arena()
     power = seat(a, x_seat_token)
     with a.lock:
-        text = a.legal(power, [x for x in locs.split(",") if x])
+        text = a.legal(power, [x for x in locs.split(",") if x], lang_of(x_lang))
     return dict(text=text)
 
 
@@ -570,17 +599,19 @@ def board(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
 
 @app.get("/api/inbox")
 def inbox(x_seat_token: Annotated[str | None, Header()] = None,
+          x_lang: Annotated[str | None, Header()] = None,
           with_: str | None = Query(None, alias="with"),
           phase: str | None = None) -> dict:
     a = require_arena()
     power = seat(a, x_seat_token)
     with a.lock:
-        text = a.inbox(power, with_, phase)
+        text = a.inbox(power, with_, phase, lang_of(x_lang))
     return dict(text=text)
 
 
 @app.get("/api/history")
 def history(x_seat_token: Annotated[str | None, Header()] = None,
+            x_lang: Annotated[str | None, Header()] = None,
             phase: str | None = None) -> dict:
     """结算原文。**不带令牌也能看**，只是没有「（你）」标记。
 
@@ -591,12 +622,13 @@ def history(x_seat_token: Annotated[str | None, Header()] = None,
     a = require_arena()
     power = optional_seat(a, x_seat_token) or ""
     with a.lock:
-        text = a.history_text(power, phase)
+        text = a.history_text(power, phase, lang=lang_of(x_lang))
     return dict(text=text, power=power)
 
 
 @app.get("/api/replay")
-def replay(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
+def replay(x_seat_token: Annotated[str | None, Header()] = None,
+           x_lang: Annotated[str | None, Header()] = None) -> dict:
     """复盘：逐阶段回放，视角永远锁在调用者的座位上。
 
     私信是最容易在这里漏的东西——`inbox(power, phase=...)` 本身按座位过滤，
@@ -608,6 +640,7 @@ def replay(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
     """
     a = require_arena()
     power = optional_seat(a, x_seat_token) or ""
+    lang = lang_of(x_lang)
     with a.lock:
         history_log = list(a.data["history"])
         items = []
@@ -619,9 +652,9 @@ def replay(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
                 phase=phase,
                 time=rec.get("time"),
                 agreed_draw=rec.get("event") == "agreed_draw",
-                text=a.history_text(power, phase),
+                text=a.history_text(power, phase, lang=lang),
                 centers={p: len(c) for p, c in centers.items() if c},
-                messages=a.inbox(power, phase=phase) if power else "",
+                messages=a.inbox(power, phase=phase, lang=lang) if power else "",
             ))
         current = a.game().get_current_phase()
         stage = a.data["stage"]
@@ -631,7 +664,7 @@ def replay(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
             current_phase=current,
             settled=len(items),
             stage=stage,
-            result_text=a.result_text() if stage == "done" else "",
+            result_text=a.result_text(lang) if stage == "done" else "",
         )
 
 
@@ -667,18 +700,22 @@ def export_game(x_seat_token: Annotated[str | None, Header()] = None,
 
 
 @app.post("/api/send")
-def send(req: SendReq, x_seat_token: Annotated[str | None, Header()] = None) -> dict:
-    return _act(x_seat_token, dict(action="send", to=req.to, text=req.text))
+def send(req: SendReq, x_seat_token: Annotated[str | None, Header()] = None,
+         x_lang: Annotated[str | None, Header()] = None) -> dict:
+    return _act(x_seat_token, dict(action="send", to=req.to, text=req.text), lang_of(x_lang))
 
 
 @app.post("/api/orders")
-def orders(req: OrdersReq, x_seat_token: Annotated[str | None, Header()] = None) -> dict:
-    return _act(x_seat_token, dict(action="orders", orders=req.orders))
+def orders(req: OrdersReq, x_seat_token: Annotated[str | None, Header()] = None,
+           x_lang: Annotated[str | None, Header()] = None) -> dict:
+    return _act(x_seat_token, dict(action="orders", orders=req.orders), lang_of(x_lang))
 
 
 @app.post("/api/draw")
-def draw(req: DrawReq, x_seat_token: Annotated[str | None, Header()] = None) -> dict:
-    return _act(x_seat_token, dict(action="draw" if req.vote else "undraw"))
+def draw(req: DrawReq, x_seat_token: Annotated[str | None, Header()] = None,
+         x_lang: Annotated[str | None, Header()] = None) -> dict:
+    return _act(x_seat_token, dict(action="draw" if req.vote else "undraw"),
+                lang_of(x_lang))
 
 
 # ---------------- 观战频道 ----------------
@@ -960,7 +997,7 @@ def llm_context(power: str, x_admin_key: Annotated[str | None, Header()] = None)
                 stats=ctx.stats)
 
 
-def _act(token: str | None, payload: dict) -> dict:
+def _act(token: str | None, payload: dict, lang: str = "zh") -> dict:
     import uuid
 
     a = require_arena()
@@ -968,13 +1005,13 @@ def _act(token: str | None, payload: dict) -> dict:
     payload["request_id"] = str(uuid.uuid4())
     with a.lock:
         try:
-            result = a.act(power, payload)
+            result = a.act(power, payload, lang)
         except OrderError as exc:
             raise HTTPException(400, str(exc)) from exc
         except (ValueError, KeyError) as exc:
             raise HTTPException(400, str(exc)) from exc
         settled = try_settle(a)
-        return dict(result=result, settled=settled, state=summary(a))
+        return dict(result=result, settled=settled, state=summary(a, lang=lang))
 
 
 @app.get("/")

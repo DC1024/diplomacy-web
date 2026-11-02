@@ -8,6 +8,7 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
+from app import i18n
 from app.engine.arena import POWERS
 from app.llm.orders import hold_orders
 
@@ -70,7 +71,10 @@ def test_replay_returns_one_entry_per_settled_phase(srv):
     assert d["current_phase"] != second
 
     head = d["items"][0]
-    assert "结算" in head["text"] and "ITALY" in head["text"]
+    assert "结算" in head["text"]
+    # 复盘文本是给人看的：认得出是谁靠国名，不靠引擎代号
+    assert i18n.power_name("ITALY") in head["text"]
+    assert "ITALY" not in head["text"]
     # 1901 春开局七国各 3 中心（俄国 4），中心数要能算出来
     assert head["centers"]["RUSSIA"] == 4 and head["centers"]["ITALY"] == 3
 

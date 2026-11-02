@@ -8,6 +8,7 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
+from app import i18n
 from app.engine.arena import POWERS
 from app.llm import LLMSeat, ScriptedProvider, SeatRunner
 from app.llm.context import KEEP_MSGS, SELF_CHARS, SELF_KEEP, estimate_tokens
@@ -151,12 +152,15 @@ def test_seat_sees_its_own_offer_before_the_reply(srv):
     a.act("AUSTRIA", dict(action="send", to="FRANCE", text="同意。", request_id="m2"))
 
     mine = build_context(a, "FRANCE").as_prompt()
-    assert "你 → AUSTRIA：我不打比利时，你把北海让给我。" in mine, mine
-    assert "[S1901M] AUSTRIA → 你：同意。" in mine, mine
+    # 断言跟着展示层走：座位上下文里出现的是国名（也是模型谈判时的称呼），
+    # 不是引擎代号。代号只活在命令、存档和 API 参数里。
+    at, fr = i18n.power_name("AUSTRIA"), i18n.power_name("FRANCE")
+    assert f"你 → {at}：我不打比利时，你把北海让给我。" in mine, mine
+    assert f"[S1901M] {at} → 你：同意。" in mine, mine
 
     theirs = build_context(a, "AUSTRIA").as_prompt()
-    assert "[S1901M] FRANCE → 你：我不打比利时" in theirs  # 收件人照旧看得到原文
-    assert "你 → AUSTRIA" not in theirs  # 别把「自己发出」的块抄进别人上下文
+    assert f"[S1901M] {fr} → 你：我不打比利时" in theirs  # 收件人照旧看得到原文
+    assert f"你 → {at}" not in theirs  # 别把「自己发出」的块抄进别人上下文
 
     outsider = build_context(a, "GERMANY").as_prompt()
     assert "比利时" not in outsider and "→ 你：同意。" not in outsider
@@ -222,7 +226,7 @@ def test_debug_context_matches_the_real_prompt(srv):
     d = client.get("/api/llm/context?power=TURKEY").json()
     joined = "\n".join(p for p in (d["digest"], d["own"], d["note"], d["text"]) if p)
     assert joined == build_context(a, "TURKEY").as_prompt()
-    assert "你 → RUSSIA：黑海我不动。" in d["own"]
+    assert f"你 → {i18n.power_name('RUSSIA')}：黑海我不动。" in d["own"]
     assert d["stats"]["kept_own"] == 1
 
 

@@ -16,13 +16,15 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from diplomacy import Game
+from .. import i18n
 from .simulate import END_YEAR, final_result, finish_after_fall
 
 POWERS = ['AUSTRIA', 'ENGLAND', 'FRANCE', 'GERMANY', 'ITALY', 'RUSSIA', 'TURKEY']
-SEASONS = {'S': '春', 'F': '秋', 'W': '冬'}
-KINDS = {'M': '外交与移动', 'R': '撤退', 'A': '增兵与裁军'}
-RESULT_LABELS = {'bounce': '受阻', 'dislodged': '被击退', 'cut': '支援被切断', 'void': '无效',
-                 'disrupted': '海运中断', 'no convoy': '无有效海运', 'disband': '解散'}
+# 这三个常量是**中文**视图，留给导出（`app/export.py` 只用中文战报）与老调用方；
+# 双语词条全在 app/i18n.py，裁判逻辑本身不依赖语言。
+SEASONS = {k: v[0] for k, v in i18n.SEASONS.items()}
+KINDS = {k: v[0] for k, v in i18n.KINDS.items()}
+RESULT_LABELS = {k: v[0] for k, v in i18n.RESULT_LABELS.items()}
 MSG_LIMIT = {'private': 300, 'public': 400}
 
 
@@ -30,10 +32,12 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def phase_name(phase):
-    if not phase or phase in ('COMPLETED', 'FORMING'):
-        return phase or ''
-    return f'{phase[1:5]}年{SEASONS.get(phase[0], phase[0])}·{KINDS.get(phase[-1], phase[-1])}（{phase}）'
+def phase_name(phase, lang='zh'):
+    """`S1901M` → `1901年春季·外交与移动（S1901M）`（`lang="en"` 时给英文）。
+
+    默认中文：模型座位的上下文、导出、旧测试都不传语言，行为与以前一致。
+    """
+    return i18n.phase_name(phase, lang)
 
 
 def normalize_order(text):
@@ -106,28 +110,33 @@ class Arena:
                 and (power in m['to'] or 'GLOBAL' in m['to'])]
 
     # ---------- 文字简报 ----------
-    def _board(self, game, power):
+    def _board(self, game, power, lang='zh'):
         centers, units = game.get_centers(), game.get_units()
         owned = {c for cs in centers.values() for c in cs}
-        lines = ['【补给中心】（18 个单独获胜）']
+        lines = [i18n.t(lang, 'board.centers')]
+        none = i18n.t(lang, 'board.none')
         for p in POWERS:
             if centers.get(p) or units.get(p):
-                tag = '（你）' if p == power else ''
-                lines.append(f'{p}{tag} {len(centers.get(p, []))}：{" ".join(sorted(centers.get(p, []))) or "无"}')
+                tag = i18n.t(lang, 'board.you') if p == power else ''
+                lines.append(i18n.t(lang, 'board.line', power=i18n.power_name(p, lang), tag=tag,
+                                    n=len(centers.get(p, [])),
+                                    items=' '.join(sorted(centers.get(p, []))) or none))
         neutral = sorted(set(game.map.scs) - owned)
-        lines.append(f'中立 {len(neutral)}：{" ".join(neutral) or "无"}')
-        lines.append('【部队】（* 表示被击退、等待撤退）')
+        lines.append(i18n.t(lang, 'board.neutral', n=len(neutral),
+                            list=' '.join(neutral) or none))
+        lines.append(i18n.t(lang, 'board.units'))
         for p in POWERS:
             if units.get(p):
-                tag = '（你）' if p == power else ''
-                lines.append(f'{p}{tag} {len(units[p])}：{", ".join(units[p])}')
+                tag = i18n.t(lang, 'board.you') if p == power else ''
+                lines.append(i18n.t(lang, 'board.line', power=i18n.power_name(p, lang), tag=tag,
+                                    n=len(units[p]), items=', '.join(units[p])))
         return lines
 
-    def _settlement(self, record, power):
+    def _settlement(self, record, power, lang='zh'):
         phase = record['phase']
         if record.get('event') == 'agreed_draw':
-            return [f'—— {phase_name(phase)}：全体同意和局，本阶段命令未执行 ——']
-        lines = [f'—— {phase_name(phase)} 结算 ——']
+            return [i18n.t(lang, 'settle.draw', phase=phase_name(phase, lang))]
+        lines = [i18n.t(lang, 'settle.header', phase=phase_name(phase, lang))]
         results = record.get('results') or {}
         for p in POWERS:
             orders = (record.get('orders') or {}).get(p)
@@ -137,89 +146,117 @@ class Arena:
             status = results.get(p, {})
             for order in orders:
                 unit = ' '.join(order.split()[:2])
-                failed = [RESULT_LABELS.get(r, r) for r in status.get(unit, []) if r]
-                marks.append(order + (f'（{"、".join(failed)}）' if failed else ''))
-            tag = '（你）' if p == power else ''
-            lines.append(f'{p}{tag}：' + '；'.join(marks))
+                failed = [i18n.result_label(r, lang) for r in status.get(unit, []) if r]
+                marks.append(i18n.t(lang, 'settle.mark', order=order,
+                                    reasons=i18n.t(lang, 'settle.list_sep').join(failed))
+                             if failed else order)
+            tag = i18n.t(lang, 'board.you') if p == power else ''
+            lines.append(i18n.t(lang, 'settle.power_line', power=i18n.power_name(p, lang),
+                                tag=tag, orders=i18n.t(lang, 'settle.order_sep').join(marks)))
         before = (record.get('before') or {}).get('centers', {})
         after = record.get('centers') or {}
         for p in POWERS:
             gained = sorted(set(after.get(p, [])) - set(before.get(p, [])))
             lost = sorted(set(before.get(p, [])) - set(after.get(p, [])))
             if gained or lost:
-                lines.append(f'中心变化 {p}：' + (f'+{" ".join(gained)} ' if gained else '')
-                             + (f'-{" ".join(lost)}' if lost else ''))
+                delta = (f'+{" ".join(gained)} ' if gained else '') + (
+                    f'-{" ".join(lost)}' if lost else '')
+                lines.append(i18n.t(lang, 'settle.center_delta',
+                                    power=i18n.power_name(p, lang), delta=delta))
         return lines
 
-    def _task(self, game, power):
+    def _task(self, game, power, lang='zh'):
         if self.data['stage'] == 'done':
-            return ['【整局结束】' + self.result_text()]
+            return [i18n.t(lang, 'brief.game_over', result=self.result_text(lang))]
         if power not in self.active(game):
-            return ['【你已被淘汰】无需再操作。']
+            return [i18n.t(lang, 'brief.eliminated')]
         phase = game.get_current_phase()
         own = self.data['orders'].get(power)
         if power not in self.required(game):
-            return ['【本阶段你无需行动】' + ('可以继续外交。' if phase.endswith('M') else '等待其他国家处理。')]
+            return [i18n.t(lang, 'brief.no_action' if phase.endswith('M')
+                           else 'brief.no_action_wait')]
         lines = []
         if phase.endswith('M'):
-            lines.append('【本阶段你需要】给每支部队下令（未下令的部队不会自动驻守）。')
+            lines.append(i18n.t(lang, 'task.need_orders'))
         elif phase.endswith('R'):
             possible = game.get_all_possible_orders()
-            lines.append('【本阶段你需要】为被击退的部队选择撤退或解散：')
+            lines.append(i18n.t(lang, 'task.need_retreats'))
             for loc in game.get_orderable_locations(power):
-                lines.append(f'  {loc}：' + ' | '.join(sorted(possible[loc])))
+                lines.append(i18n.t(lang, 'task.loc_list', loc=loc,
+                                    orders=' | '.join(sorted(possible[loc]))))
         else:
             delta = len(game.get_centers(power)) - len(game.get_units(power))
             possible = game.get_all_possible_orders()
             options = sorted({o for loc in game.get_orderable_locations(power) for o in possible[loc]})
             if delta > 0:
-                lines.append(f'【本阶段你需要】最多增兵 {delta} 支（也可少建或不建，提交空命令即放弃）。可选：')
+                lines.append(i18n.t(lang, 'task.need_builds', delta=delta))
             else:
-                lines.append(f'【本阶段你需要】必须裁军 {-delta} 支。可选：')
+                lines.append(i18n.t(lang, 'task.need_disbands', n=-delta))
             lines.append('  ' + ' | '.join(options))
         if own is not None:
-            lines.append('你已提交：' + ('；'.join(own) if own else '（空命令）') + '。需要修改就重新提交。')
+            lines.append(i18n.t(lang, 'task.submitted',
+                                orders=i18n.t(lang, 'settle.order_sep').join(own)
+                                if own else i18n.t(lang, 'task.submitted_empty')))
         else:
-            lines.append('你尚未提交。')
+            lines.append(i18n.t(lang, 'task.not_submitted'))
         others = [p for p in self.required(game) if p != power]
-        lines.append(f'其他需行动国家已交 {sum(p in self.data["ready"] for p in others)}/{len(others)}。')
+        lines.append(i18n.t(lang, 'task.others',
+                            done=sum(p in self.data["ready"] for p in others), total=len(others)))
         if phase.endswith('M') and self.data['draw_votes']:
-            lines.append('和局赞成：' + ', '.join(sorted(self.data['draw_votes'])))
+            lines.append(i18n.t(lang, 'task.draw_votes',
+                                list=', '.join(sorted(self.data['draw_votes']))))
         return lines
 
-    def result_text(self):
+    def result_text(self, lang='zh'):
         r = self.data.get('result') or {}
         if not r:
             return ''
-        reasons = {'victory': '18 中心单独胜利', 'agreed_draw': '全体同意和局', 'turn_limit': f'{END_YEAR} 年秋季到期和局'}
+        reason = r.get('reason')
+        reasons = {'victory': i18n.t(lang, 'result.victory'),
+                   'agreed_draw': i18n.t(lang, 'result.agreed_draw'),
+                   'turn_limit': i18n.t(lang, 'result.turn_limit', year=END_YEAR)}
         who = r.get('winners') or r.get('draw_participants') or []
         ranked = sorted((r.get('scores') or {}).items(), key=lambda kv: -kv[1])
-        points = '；'.join(f'{p} {v:g}' for p, v in ranked if v)
-        return f'{reasons.get(r.get("reason"), r.get("reason"))}：{", ".join(who)}' + (f'。得分：{points}' if points else '')
+        points = i18n.t(lang, 'settle.list_sep').join(
+            f'{i18n.power_name(p, lang)} {v:g}' for p, v in ranked if v)
+        line = i18n.t(lang, 'result.line', reason=reasons.get(reason, reason),
+                      who=', '.join(i18n.power_name(p, lang) for p in who))
+        return line + (i18n.t(lang, 'result.points', points=points) if points else '')
 
-    def brief(self, power, msg_after=0, hist_after=0, full=True):
-        """返回 (文字, 新消息游标, 新历史游标)。full=False 时省略整张局面。"""
+    def brief(self, power, msg_after=0, hist_after=0, full=True, lang='zh'):
+        """返回 (文字, 新消息游标, 新历史游标)。full=False 时省略整张局面。
+
+        `lang` 只影响措辞：命令、代号、存档一律不变，所以模型座位的上下文仍然是中文
+        （它们本来就用中文谈判），而人看的页面可以切英文。
+        """
         game = self.game()
         phase = game.get_current_phase()
-        lines = [f'==== 你是 {power} · 当前 {phase_name(phase) if self.data["stage"] != "done" else "已结束"} ====']
+        who = i18n.power_name(power, lang)
+        if self.data['stage'] != 'done':
+            lines = [i18n.t(lang, 'brief.title', power=who, phase=phase_name(phase, lang))]
+        else:
+            lines = [i18n.t(lang, 'brief.title_done', power=who)]
         history = self.data['history']
         for record in history[hist_after:]:
-            lines += self._settlement(record, power)
+            lines += self._settlement(record, power, lang)
         incoming = self.incoming(power)
         new = incoming[msg_after:]
         if new:
-            lines.append(f'【新消息 {len(new)} 条】')
+            lines.append(i18n.t(lang, 'brief.new_msgs', n=len(new)))
             for m in new:
-                target = '全体' if 'GLOBAL' in m['to'] else '你'
-                lines.append(f'[{m["phase"]}] {m["sender"]} → {target}：{m["text"]}')
+                target = (i18n.t(lang, 'brief.to_all') if 'GLOBAL' in m['to']
+                          else i18n.t(lang, 'brief.to_you'))
+                lines.append(i18n.t(lang, 'brief.msg_line', phase=m['phase'],
+                                    sender=i18n.power_name(m['sender'], lang),
+                                    target=target, text=m['text']))
         elif msg_after == 0 and not history[hist_after:]:
-            lines.append('【暂无消息】')
+            lines.append(i18n.t(lang, 'brief.no_msgs'))
         if full:
-            lines += self._board(game, power)
-        lines += self._task(game, power)
+            lines += self._board(game, power, lang)
+        lines += self._task(game, power, lang)
         return '\n'.join(lines), len(incoming), len(history)
 
-    def legal(self, power, locs=None):
+    def legal(self, power, locs=None, lang='zh'):
         game = self.game()
         possible = game.get_all_possible_orders()
         mine = game.get_orderable_locations(power)
@@ -227,10 +264,11 @@ class Arena:
         lines = []
         for loc in mine:
             if any(loc.split('/')[0] == w.split('/')[0] for w in wanted):
-                lines.append(f'{loc}：' + ' | '.join(sorted(possible[loc])))
-        return '\n'.join(lines) or '本阶段你没有可下令的部队。'
+                lines.append(i18n.t(lang, 'legal.line', loc=loc,
+                                    orders=' | '.join(sorted(possible[loc]))))
+        return '\n'.join(lines) or i18n.t(lang, 'legal.none')
 
-    def inbox(self, power, other=None, phase=None):
+    def inbox(self, power, other=None, phase=None, lang='zh'):
         items = [m for m in self.data['messages'] if m['sender'] == power or power in m['to'] or 'GLOBAL' in m['to']]
         if other:
             other = other.upper()
@@ -239,18 +277,23 @@ class Arena:
             items = [m for m in items if m['phase'] == phase.upper()]
         out = []
         for m in items:
-            src = '你' if m['sender'] == power else m['sender']
-            dst = '全体' if 'GLOBAL' in m['to'] else ('你' if power in m['to'] else m['to'][0])
-            out.append(f'[{m["phase"]}] {src} → {dst}：{m["text"]}')
-        return '\n'.join(out) or '没有符合条件的消息。'
+            src = (i18n.t(lang, 'brief.to_you') if m['sender'] == power
+                   else i18n.power_name(m['sender'], lang))
+            dst = (i18n.t(lang, 'brief.to_all') if 'GLOBAL' in m['to']
+                   else (i18n.t(lang, 'brief.to_you') if power in m['to']
+                         else i18n.power_name(m['to'][0], lang)))
+            out.append(i18n.t(lang, 'brief.msg_line', phase=m['phase'], sender=src,
+                              target=dst, text=m['text']))
+        return '\n'.join(out) or i18n.t(lang, 'inbox.none')
 
-    def history_text(self, power, phase=None, last=4):
+    def history_text(self, power, phase=None, last=4, lang='zh'):
         items = self.data['history']
         items = [h for h in items if h['phase'] == phase.upper()] if phase else items[-last:]
-        return '\n'.join(l for h in items for l in self._settlement(h, power)) or '尚无结算记录。'
+        return ('\n'.join(l for h in items for l in self._settlement(h, power, lang))
+                or i18n.t(lang, 'history.none'))
 
     # ---------- 操作 ----------
-    def validate_orders(self, power, orders, game):
+    def validate_orders(self, power, orders, game, lang='zh'):
         possible = game.get_all_possible_orders()
         locs = game.get_orderable_locations(power)
         allowed = {o for loc in locs for o in possible[loc]}
@@ -259,27 +302,30 @@ class Arena:
             if order not in allowed:
                 src = order.split()[1].split('/')[0] if len(order.split()) > 1 else ''
                 hint = [l for l in locs if l.split('/')[0] == src]
-                errors.append(f'不合法：{order}' + (f'。{hint[0]} 可选：' + ' | '.join(sorted(possible[hint[0]])) if hint else '。该地点没有你的可下令部队。'))
+                errors.append(i18n.t(lang, 'orders.illegal', order=order) + (
+                    i18n.t(lang, 'orders.illegal_hint', loc=hint[0],
+                            options=' | '.join(sorted(possible[hint[0]])))
+                    if hint else i18n.t(lang, 'orders.illegal_noloc')))
         sources = [o.split()[1].split('/')[0] for o in orders if len(o.split()) > 1]
         for s in sorted(set(sources)):
             if sources.count(s) > 1:
-                errors.append(f'{s} 重复下令，只能保留一条。')
+                errors.append(i18n.t(lang, 'orders.duplicate', loc=s))
         phase = game.get_current_phase()
         if phase.endswith(('M', 'R')):
             given = {o.split()[1].split('/')[0] for o in orders if o in allowed}
             missing = [l for l in locs if l.split('/')[0] not in given]
             if missing:
-                errors.append('缺少命令：' + ' '.join(missing) + '（每支需要行动的部队都要下令）')
+                errors.append(i18n.t(lang, 'orders.missing', locs=' '.join(missing)))
         else:
             delta = len(game.get_centers(power)) - len(game.get_units(power))
             if delta < 0 and len(orders) != -delta:
-                errors.append(f'需要裁军 {-delta} 支，你提交了 {len(orders)} 条。')
+                errors.append(i18n.t(lang, 'orders.disband_count', n=-delta, m=len(orders)))
             if delta >= 0 and len(orders) > delta:
-                errors.append(f'最多增兵 {delta} 支，你提交了 {len(orders)} 条。')
+                errors.append(i18n.t(lang, 'orders.build_count', n=delta, m=len(orders)))
         if errors:
             raise OrderError('\n'.join(errors))
 
-    def act(self, power, payload):
+    def act(self, power, payload, lang='zh'):
         with self.lock:
             request_id = payload.get('request_id')
             if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
@@ -292,50 +338,56 @@ class Arena:
                     raise ValueError('request_id 重复')
                 return old['result']
             if self.data['stage'] == 'done':
-                return dict(ok=False, text='整局已结束。' + self.result_text())
+                return dict(ok=False, text=i18n.t(lang, 'act.game_over') + self.result_text(lang))
             if self.data['paused']:
-                return dict(ok=False, text='对局已冻结，本次操作未执行。结束回复，等待恢复。')
+                return dict(ok=False, text=i18n.t(lang, 'act.frozen'))
             game = self.game()
             phase = game.get_current_phase()
             action = payload.get('action')
             if power not in self.active(game):
-                return dict(ok=False, text='你已被淘汰。')
+                return dict(ok=False, text=i18n.t(lang, 'act.eliminated'))
             rollback = json.dumps(self.data)
             try:
                 if action == 'send':
                     if not phase.endswith('M'):
-                        raise ValueError('只有春、秋移动阶段可以发消息。')
+                        raise ValueError(i18n.t(lang, 'act.only_movement'))
                     to = str(payload.get('to', '')).upper()
                     text = payload.get('text')
                     if to != 'GLOBAL' and (to not in self.active(game) or to == power):
-                        raise ValueError('收件人必须是其他在场国家，或 GLOBAL（全体公开）。')
+                        raise ValueError(i18n.t(lang, 'act.bad_recipient'))
                     limit = MSG_LIMIT['public' if to == 'GLOBAL' else 'private']
                     if not isinstance(text, str) or not text.strip():
-                        raise ValueError('消息不能为空。')
+                        raise ValueError(i18n.t(lang, 'act.empty_message'))
                     if len(text) > limit:
-                        raise ValueError(f'消息 {len(text)} 字，超过上限 {limit} 字（含标点）。请缩短后重发。')
+                        raise ValueError(i18n.t(lang, 'act.message_too_long',
+                                                n=len(text), limit=limit))
                     self.data['messages'].append(dict(id=secrets.token_hex(8), sender=power, to=[to],
                                                       text=text.strip(), phase=phase, time=now()))
-                    result = dict(ok=True, text=f'已发送给 {"全体" if to == "GLOBAL" else to}。')
+                    result = dict(ok=True, text=i18n.t(
+                        lang, 'act.sent',
+                        to=(i18n.t(lang, 'brief.to_all') if to == 'GLOBAL'
+                            else i18n.power_name(to, lang))))
                 elif action == 'orders':
                     if power not in self.required(game):
-                        raise ValueError('本阶段你无需下令。')
+                        raise ValueError(i18n.t(lang, 'act.no_orders_needed'))
                     orders = payload.get('orders')
                     if not isinstance(orders, list) or not all(isinstance(o, str) for o in orders):
-                        raise ValueError('命令格式错误。')
+                        raise ValueError(i18n.t(lang, 'act.bad_order_format'))
                     orders = [normalize_order(o) for o in orders if str(o).strip()]
-                    self.validate_orders(power, orders, game)
+                    self.validate_orders(power, orders, game, lang)
                     self.data['orders'][power] = orders
                     if power not in self.data['ready']:
                         self.data['ready'].append(power)
-                    result = dict(ok=True, text='军令已提交：' + ('；'.join(orders) if orders else '（空命令）')
-                                  + '。收到新消息时你会被唤醒，可以再改。')
+                    result = dict(ok=True, text=i18n.t(
+                        lang, 'act.orders_in',
+                        orders=i18n.t(lang, 'settle.order_sep').join(orders)
+                        if orders else i18n.t(lang, 'task.submitted_empty')))
                 elif action in ('draw', 'undraw'):
                     if not phase.endswith('M'):
-                        raise ValueError('只有春、秋移动阶段可以表决和局。')
+                        raise ValueError(i18n.t(lang, 'act.draw_movement_only'))
                     draw_from = self.data.get('draw_from')
                     if action == 'draw' and draw_from and int(phase[1:5]) < draw_from:
-                        raise ValueError(f'本局 {draw_from} 年春季起才能表决协议和局。')
+                        raise ValueError(i18n.t(lang, 'act.draw_too_early', year=draw_from))
                     votes = self.data['draw_votes']
                     if action == 'draw' and power not in votes:
                         votes.append(power)
@@ -348,12 +400,16 @@ class Arena:
                         self.data['history'].append(dict(phase=phase, orders={}, before=before, after=game.get_state(), results={},
                             units=game.get_units(), centers=game.get_centers(), time=now(), event='agreed_draw'))
                         self.data.update(game=game.to_dict(), stage='done', orders={}, ready=[])
-                        result = dict(ok=True, text='全体同意，和局成立。' + self.result_text())
+                        result = dict(ok=True, text=i18n.t(lang, 'act.draw_passed')
+                                      + self.result_text(lang))
                     else:
-                        result = dict(ok=True, text=('已赞成和局' if action == 'draw' else '已撤回和局赞成')
-                                      + f'。当前赞成：{", ".join(sorted(votes)) or "无"}；需要全部在场国家同意。')
+                        result = dict(ok=True, text=i18n.t(
+                            lang, 'act.draw_voted' if action == 'draw' else 'act.draw_unvoted')
+                                      + i18n.t(lang, 'act.draw_tally',
+                                               votes=', '.join(sorted(votes))
+                                               or i18n.t(lang, 'board.none')))
                 else:
-                    raise ValueError('未知操作')
+                    raise ValueError(i18n.t(lang, 'act.unknown'))
                 self.data['requests'][key] = dict(digest=digest, result=result, time=now())
                 if self.data['auto_settle']:
                     self.settle(quiet=True)

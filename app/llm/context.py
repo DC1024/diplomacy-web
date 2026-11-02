@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .. import i18n
+
 # 默认窗口：最近 3 段结算 + 最近 30 条消息。实测中局约 5 KB，终局也不会膨胀。
 KEEP_HIST = 3
 KEEP_MSGS = 30
@@ -84,7 +86,8 @@ def _own(a, power: str, keep: int = SELF_KEEP, chars: int = SELF_CHARS) -> tuple
         return "", 0
     lines = ["【你此前发出的信（只你自己可见）】照对方的回信，确认你答应过什么。"]
     for m in mine:
-        to = "全体" if "GLOBAL" in m.get("to", []) else (m.get("to") or ["?"])[0]
+        to = ("全体" if "GLOBAL" in m.get("to", [])
+              else i18n.power_name((m.get("to") or ["?"])[0]))
         text = m.get("text", "")
         if len(text) > chars:
             text = text[:chars] + "…"
@@ -113,7 +116,7 @@ def _digest(a, power: str, upto: int) -> str:
 
     # 谁在扩张：按末态中心数排前三
     ranked = sorted(((p, len(c)) for p, c in end.items() if c), key=lambda kv: -kv[1])[:3]
-    leaders = "、".join(f"{p} {n}" for p, n in ranked if p != power)
+    leaders = "、".join(f"{i18n.power_name(p)} {n}" for p, n in ranked if p != power)
 
     head = (f"【早期局势摘要】已略去前 {len(history)} 个阶段（{first['phase']} 起）的逐条结算。"
             f"你的中心数 {mine_start}→{mine_end}；期间共 {flips} 次中心易手。")

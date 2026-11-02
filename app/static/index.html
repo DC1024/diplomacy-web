@@ -150,6 +150,20 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 .chip.move,.chip.retreat{border-color:var(--accent-line)}
 .chip.on{border-color:var(--accent);background:var(--accent-soft)}
 
+/* 军令页：按钮/手打两种方式共用一个文本域，上面这块只是它的结构化编辑器 */
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-bottom:10px}
+.seg button{background:none;border:none;color:var(--muted);padding:5px 14px;font-size:12px;cursor:pointer}
+.seg button.on{background:var(--accent-soft);color:var(--accent)}
+#actPick{display:flex;flex-direction:column;gap:8px}
+.actgrp{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.actgrp .gtag{font-size:11px;color:var(--muted);min-width:34px;flex:0 0 auto}
+.draft{display:flex;flex-direction:column;gap:4px;margin:8px 0}
+.draft .dl{display:flex;align-items:center;gap:8px;font-size:12px}
+.draft .dl code{background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:2px 8px;font-size:12px}
+.draft .dl button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:0 4px;line-height:1}
+.draft .dl button:hover{color:var(--bad)}
+.draft .hint{font-size:12px;color:var(--muted)}
+
 /* 地图本体：尺寸按 viewBox 单位算（1878×1517 缩到约 660px 宽，字号 21 约合屏幕上 7px） */
 .area{stroke:var(--map-line);stroke-width:1.1;vector-effect:non-scaling-stroke}
 .area.mine{cursor:pointer}
@@ -213,7 +227,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 </head>
 <body>
 <header>
-  <div class="brand">七国<b>纵横</b></div>
+  <div class="brand" data-i18n-html="brand">七国<b>纵横</b></div>
   <span class="tag">B1 · 热座+模型</span>
   <span class="tag" id="live" title="更新方式">轮询</span>
   <div class="phase" id="phase">读取中…</div>
@@ -221,13 +235,14 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
   <span id="boundTag" class="hidden"></span>
   <button id="btnUnbind" class="hidden">退出绑定</button>
   <input id="adminKey" class="adm" type="password" placeholder="管理密钥" autocomplete="off" hidden>
+  <button id="btnLang" title="Switch to English">EN</button>
   <button id="btnTheme" title="切换日夜模式">☀ 日间</button>
   <button id="btnRefresh">刷新</button>
   <button id="btnNew">新局</button>
 </header>
 <div id="warn" class="hidden">
   <div class="wfull">
-    <div class="wbody">
+    <div class="wbody" data-i18n-html="warnBody">
       <b>这个部署对网络开放，但没设管理密钥 —— 管理面已锁定。</b><br>
       建局、重置、发座位令牌、改模型配置现在全部返回 403；外人打开只能围观。
       这样即使没人看守，也不会有人一次拿到 7 个座位令牌把全场私信读走，更不会把存档清掉。<br>
@@ -269,7 +284,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
         <input id="watchKey" class="hidden" placeholder="观战码" autocomplete="off" style="flex:1;max-width:260px">
         <button class="btn ghost" id="btnWatchKey">用观战码</button>
       </div>
-      <div class="hint" id="watchTip">观众只能看：局面与结算公开，交令与私信一概碰不到。
+      <div class="hint" id="watchTip" data-i18n-html="watchIdle">观众只能看：局面与结算公开，交令与私信一概碰不到。
         要发言请用房主发的 <code>/?watch=…</code> 链接。</div>
     </div>
 
@@ -303,11 +318,26 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
     </div>
 
     <div class="pane" id="pane-orders">
+      <div class="seg" id="orderMode">
+        <button data-mode="pad" class="on">按钮下令</button>
+        <button data-mode="text">手打命令</button>
+      </div>
+
+      <div id="orderPad">
+        <div class="hint">点一支部队，再点它要执行的动作；下方草稿两种方式都能改。</div>
+        <label>你的部队</label>
+        <div class="chiprow" id="unitPick"></div>
+        <label>选择动作</label>
+        <div id="actPick"></div>
+      </div>
+
       <label>军令（每行一条，提交整份）</label>
       <textarea id="ordersText" placeholder="A PAR - BUR&#10;A MAR S A PAR - BUR&#10;F BRE - MAO"></textarea>
+      <div class="draft" id="draftList"></div>
       <div class="row">
         <button class="btn" id="btnOrders">提交军令</button>
         <button class="btn ghost" id="btnLegal">查看合法命令</button>
+        <button class="btn ghost" id="btnClearDraft">清空草稿</button>
       </div>
       <pre class="out hidden" id="legalOut"></pre>
       <div class="hint">未下令的部队不会自动驻守，每支需要行动的部队都要下令。</div>
@@ -385,7 +415,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
             <div><button class="btn ghost" id="btnCfgSaveTest">保存并测试</button></div>
           </div>
           <div class="hint" id="cfgMsg"></div>
-          <div class="hint">「测试连接」会真发一次很小请求，把「地址写错 / 模型名不对 / 密钥无效」
+          <div class="hint" data-i18n-html="llmHint">「测试连接」会真发一次很小请求，把「地址写错 / 模型名不对 / 密钥无效」
             这三种分开——它们在页面上本来都只表现为「没反应」。测试不会覆盖已保存的配置。<br>
             「输出上限」是<b>含思维链</b>的总配额：推理型模型会先花一两千 token 想，配额给小了
             正文回来就是空的（页面只会说「未给出可解析的 JSON」）。撞墙时按正文分岔：
@@ -403,7 +433,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
         <div><button class="btn ghost" id="btnCtx">看上下文</button></div>
       </div>
       <pre class="out hidden" id="ctxOut"></pre>
-      <div class="hint">
+      <div class="hint" data-i18n-html="llmSeatsHint">
         勾选即把该国交给模型，取消则收回给人类。<br>
         模型每回合只看到「最近 3 段结算 + 最近 30 条消息 + 局面」，
         更早的历史压成一行摘要——这是成本能收住的关键。<br>
@@ -417,7 +447,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
         <div><button class="btn ghost" id="btnLinks">生成 7 条座位链接</button></div>
         <div><button class="btn ghost" id="btnRotate">换掉全部令牌</button></div>
       </div>
-      <div class="hint" id="linkHint">
+      <div class="hint" id="linkHint" data-i18n-html="linkHint">
         把每条链接单独发给对应的玩家。链接里带着该国令牌——谁拿到就等于拿到该国的私信和交令权，<b>不要群发</b>。
         对方打开后只能看见自己那一国，切不了国家。
         <br>链接已经流到群里、或者某个人的链接不该再能用时，点「换掉全部令牌」：七把钥匙同时作废，
@@ -430,7 +460,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
         <div><button class="btn ghost" id="btnWatchLink">生成观战链接</button></div>
         <div><button class="btn ghost" id="btnWatchRotate">换一把观战码</button></div>
       </div>
-      <div class="hint" id="watchAdminHint">
+      <div class="hint" id="watchAdminHint" data-i18n-html="watchAdminHint">
         观战链接只给「看局面 + 在观战频道发言」两件事：拿不到任何座位令牌，也看不到任何私信。
         谁拿到链接都能发言，转发范围请自己控制；发现码流到公开渠道就点「换一把」，旧链接立刻失效。
       </div>
@@ -441,7 +471,7 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
         <div><button class="btn ghost" id="btnPause">暂停 / 继续</button></div>
         <div><button class="btn ghost" id="btnForce">强制结算</button></div>
       </div>
-      <div class="hint">
+      <div class="hint" data-i18n-html="adminHint">
         强制结算会把所有还没交令的国家按驻守处理，然后立即推进阶段——有人掉线时用这个，别干等。
       </div>
     </div>
@@ -449,8 +479,371 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
 </main>
 <div id="toast"></div>
 <script>
-const POWERS=[["AUSTRIA","奥地利","a"],["ENGLAND","英国","e"],["FRANCE","法国","f"],["GERMANY","德国","g"],["ITALY","意大利","i"],["RUSSIA","俄国","r"],["TURKEY","土耳其","t"]];
-const NAME=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
+// ============ 中英双语 ============
+// 三条约定，和 app/i18n.py 那边是同一套思路：
+//   1. **中文是底稿**：`EN` 只放译文，取不到就原样返回中文。少一条译文只会看到中文，
+//      不会看到空白或 `undefined`——后者在界面上等于「坏了」，前者只是「还没翻译」。
+//   2. **国名单独走 `powerName()`**：`AUSTRIA` 这种代号贯穿命令、存档、令牌与引擎 API，
+//      翻译只发生在展示层。谁要在命令串里看到国名，谁就用错了函数。
+//   3. **静态壳与动态文案分开处理**：静态那些（页签、标签、提示）在启动时扫一遍 DOM 记下
+//      原文，切语言时原位替换；动态那些（简报、座位、回执）由服务端按 `X-Lang` 生成，
+//      JS 只负责把骨架用 `T()` 说对。
+const LANG_KEY="dw.lang";
+const lang0=(()=>{
+  const saved=localStorage.getItem(LANG_KEY);
+  if(saved==="zh"||saved==="en") return saved;
+  return /^en\b/i.test(navigator.language||"")?"en":"zh";
+})();
+let lang=lang0;
+
+// 键是中文原文（trim 过），值是英文。值可以是函数，用来处理语序不同的句子。
+const EN={
+  // ---- 页头 ----
+  "B1 · 热座+模型":"B1 · Hotseat + AI",
+  "更新方式":"Update mode",
+  "实时":"Live","轮询":"Polling",
+  "已连上推送：局面一变就刷新":"Connected: pushes refresh the page",
+  "推送不可用，退回 5 秒轮询":"No push available — falling back to 5s polling",
+  "读取中…":"Loading…","读取中":"Loading",
+  "☀ 日间":"☀ Light","☾ 夜间":"☾ Dark",
+  "切换日夜模式":"Toggle day / night",
+  "现在是日间模式，点一下切到夜间":"Day mode now — click for night",
+  "现在是夜间模式，点一下切到日间":"Night mode now — click for day",
+  "退出绑定":"Unbind","刷新":"Refresh","新局":"New game","管理密钥":"Admin key",
+  "剩余 {t}":"{t} left",
+  "已结束 · ":"Finished · "," · 已暂停":" · paused",
+  "对局已结束：":"Game over: ",
+  "热座模式：你持有全部七个座位的令牌，点左侧国家即切换视角。正式对局请把令牌分发给不同玩家。":
+    "Hotseat: you hold all seven seat tokens — click a power on the left to switch views. "
+    +"For a real game, hand the tokens out to different players.",
+  "点右上「新局」重开。":" Click “New game” to restart.",
+  "等待房主开局":"Waiting for the host","等待开局":"Waiting to start",
+  "等待管理密钥":"Waiting for admin key","连接失败":"Connection failed",
+  "连接失败：{msg}":"Connection failed: {msg}",
+  "需要管理密钥：请在右上角输入后按回车":"Admin key required — type it in the top right and press Enter",
+
+  // ---- 未设密钥的告警条 ----
+  "收起":"Dismiss",
+  "⚠ 未设管理密钥，管理面已锁定（只能围观） —— 点此看详情":
+    "⚠ No admin key set — admin surface locked (watch only). Click for details",
+
+  // ---- 页签 ----
+  "简报":"Brief","地图":"Map","观战":"Watch","发信":"Messages","军令":"Orders",
+  "收件箱":"Inbox","复盘":"Replay","模型":"AI","管理":"Admin","战况":"Situation",
+
+  // ---- 座位栏 ----
+  "已交":"done","模型":"AI",
+  "{c}城/{u}军":"{c} SC / {u} units",
+  "观战者不能切国家":"Spectators cannot switch powers",
+  "该座位由其他人操作":"This seat belongs to another player",
+  "已绑定：{p}":"Bound: {p}",
+  "你是 {p}：只持有本国令牌，别国的私信看不到，也切不过去。":
+    "You are {p}: you hold only your own token — other powers' letters are invisible to you, and you cannot switch.",
+  "退出绑定后会回到热座模式（需要重新建局/输入密钥），确定？":
+    "Unbinding returns you to hotseat mode (you may need to start a game or enter the admin key again). Continue?",
+
+  // ---- 观战 ----
+  "观战频道：所有人都能看。发言需要一个观战码。":"Watch channel: everyone can read it. Speaking needs a watch code.",
+  "观战频道：你可以发言。":"Watch channel: you can speak.",
+  "观战频道：房主已开放发言，填观战码即可参与。":"Watch channel: the host opened speaking — enter a watch code to join.",
+  "观战频道：房主还没生成观战码，现在只能看。":"Watch channel: no watch code yet — read only for now.",
+  "只能看：要发言请填房主发的观战码（链接形如 /?watch=…）。":"Read only: to speak, enter the watch code the host sent you (link looks like /?watch=…).",
+  "只能看：房主还没生成观战码（在「管理」页生成一条观战链接）。":"Read only: the host has not generated a watch code yet (Admin → generate watch link).",
+  "昵称":"Nickname","旁观者":"Spectator",
+  "发言（":"Say something (","/200 字）":"/200 chars)",
+  "德国这波调虎离山":"Germany is feinting","发送":"Send","观战码":"Watch code",
+  "用观战码":"Enter watch code",
+  "观战码已保存，可以发言了":"Watch code saved — you can speak now",
+  "还没有人说话。":"Nobody has spoken yet.",
+  "观战模式：局面与结算公开。房主设了管理密钥——在右上角填入即可建局。":
+    "Spectating: the board and resolutions are public. The host set an admin key — enter it in the top right to start a game.",
+  "观战模式：局面与结算公开，交令与私信一概碰不到。":
+    "Spectating: the board and resolutions are public; orders and letters are out of reach.",
+  "你持有观战码，可以在「观战」里发言。":" You hold a watch code and can speak in Watch.",
+  "要发言需要一个观战码。":" Speaking needs a watch code.",
+  "观战模式：{msg}":"Spectating: {msg}",
+  "观战（只看 + 发言，碰不到任何座位）":"Spectators (watch + talk, holds no seat)",
+
+  // ---- 发信 ----
+  "收件人":"Recipient","正文（":"Message (","字）":" chars)",
+  "提议：我春季不进勃艮第，你守好马赛。":"Proposal: I will not enter Burgundy this spring — hold Marseille.",
+  "承诺没有强制力，允许欺骗。公开发言用 GLOBAL（上限 400 字）。":
+    "Promises are not binding — lying is allowed. Use GLOBAL to speak publicly (400 char limit).",
+  "正文不能为空":"Message cannot be empty",
+  "GLOBAL（全体公开）":"GLOBAL (public)","全部":"All",
+  "本阶段已结算":"Phase resolved",
+
+  // ---- 地图 ----
+  "点自己的部队选中，再点亮起来的省份下令。":"Click one of your units to select it, then click a highlighted province to give the order.",
+  "去交军令":"Go to orders",
+  "放大（滚轮也行）":"Zoom in (mouse wheel works too)","放大":"Zoom in",
+  "缩小":"Zoom out","复位到全图":"Reset view","复位":"Reset",
+  "还没有选中部队。带圆点的是补给中心，填充色是归属国。":"No unit selected. Dots mark supply centers; fill colour shows the owner.",
+  "还没有选中部队。小圆点标的是补给中心，填充色是归属国；金色描边的部队已经下过令。":
+    "No unit selected. Dots mark supply centers, fill colour is the owner; units with a gold ring already have orders.",
+  "调整阶段：点亮的地盘可以建造，点它选兵种。":"Adjustment phase: highlighted provinces can build — click one to pick a unit type.",
+  "{phase} · 已选 {u}{loc}（{who}），{n} 个合法动作":"{phase} · selected {u}{loc} ({who}), {n} legal orders",
+  " · 这个阶段不是你的回合":" · not your move this phase",
+  "这支部队本阶段没有可下的令。":"This unit has no legal orders this phase.",
+  "已复位到全图":"View reset",
+  "{loc} 不是 {sel} 这阶段能去的地方":"{loc} is not reachable from {sel} this phase",
+  "已写入 {order}（在「军令」页提交）":"{order} added (submit it under Orders)",
+  "中立":"Neutral","· 补给中心":"· supply center","属于":"owned by","属于 {p}":"owned by {p}",
+
+  // ---- 军令 ----
+  "军令（每行一条，提交整份）":"Orders (one per line, submitted as a whole)",
+  "提交军令":"Submit orders","查看合法命令":"Show legal orders",
+  "未下令的部队不会自动驻守，每支需要行动的部队都要下令。":
+    "Unordered units do not auto-hold. Every unit that can move needs an order.",
+  "按钮下令":"By buttons","手打命令":"Type orders",
+  "点一支部队，再点它要执行的动作；下方草稿两种方式都能改。":
+    "Click a unit, then click what it should do. The draft below can be edited either way.",
+  "你的部队":"Your units","选择动作":"Pick an action",
+  "先点上面一支部队。":"Pick a unit above first.",
+  "本阶段没有需要下令的部队。":"Nothing needs orders this phase.",
+  "（还没写军令）":"(no orders yet)",
+  "已写入":"added","删除":"remove","清空草稿":"Clear draft",
+  "这条军令的部队已经不在上面了，提交前先看一眼。":"Some orders belong to units no longer listed — check before submitting.",
+  "驻守":"Hold","解散":"Disband","撤退 → {d}":"Retreat → {d}","→ {d}":"→ {d}",
+  "→ {d}（经海路）":"→ {d} (via convoy)",
+  "建陆军":"Build army","建舰队":"Build fleet",
+  "支援 {s}":"Support {s}","护航 {s}":"Convoy {s}",
+  "移动":"Moves","支援":"Supports","护航":"Convoys","撤退":"Retreats","建造":"Builds",
+
+  // ---- 收件箱 ----
+  "只看某国":"Only from","只看某阶段":"Only in phase","查询":"Query",
+  "（没有符合条件的消息）":"(no matching messages)",
+
+  // ---- 复盘 ----
+  "阶段":"Phase","刷新复盘":"Refresh","导出战报":"Export report","导出 JSON":"Export JSON",
+  "整局战报（Markdown），含你收发的信件":"Full-game report (Markdown), including your letters",
+  "同一份事实的 JSON，给脚本或存档用":"The same facts as JSON, for scripts or archiving",
+  "选一个阶段，回看当轮结算与你自己参与的私信。":"Pick a phase to review its resolution and the letters you took part in.",
+  "复盘锁在你的座位上：别国的往来信件不会出现在这里。":"Replay is locked to your seat: other powers' letters never show up here.",
+  "没有这个阶段。":"No such phase.",
+  "（这一阶段没有你相关的往来信件）":"(no letters involving you this phase)",
+  "【本阶段你的信件】":"【Your letters this phase】",
+  "对局还没开始。":"No game running.",
+  "第 {i} / {n} 阶段":"Phase {i} / {n}","（和局）":" (draw)","{n} 中心":"{n} centers",
+  "还没有结算":"nothing yet",
+  "还没有结算记录。\n当前阶段：{p}":"Nothing resolved yet.\nCurrent phase: {p}",
+  "你是 {p} · 已结算 {n} 个阶段":"You are {p} · {n} phases resolved",
+  " · 当前 {p}":" · now {p}",
+  "已导出 JSON":"JSON exported","已导出战报":"Report exported",
+
+  // ---- 模型页 ----
+  "接入设置":"Connection","接入方式":"Mode","模型名":"Model",
+  "OpenAI 兼容（/v1/chat/completions）":"OpenAI-compatible (/v1/chat/completions)",
+  "离线脚本（不联网、不花钱）":"Offline script (no network, no cost)",
+  "要写到 /v1，例如 https://api.deepseek.com/v1":"Include /v1, e.g. https://api.deepseek.com/v1",
+  "留空表示沿用已保存的密钥":"Leave blank to keep the saved key",
+  "留空不改":"Leave blank to keep","sk-…（本机网关可留空）":"sk-… (optional for local gateways)",
+  "已保存 {h}，留空不改":"Saved {h} — leave blank to keep",
+  "输入单价":"Input price","输出单价":"Output price","¥/百万 token":"¥ / 1M tokens",
+  "单座位预算":"Per-seat budget","¥，超出自动驻守":"¥ — auto-hold when exceeded",
+  "全场预算":"Match budget","¥，0 = 不限":"¥, 0 = unlimited",
+  "输出上限":"Output cap","token，含思维链":"tokens, including reasoning",
+  "超时":"Timeout","秒":"sec",
+  "上下文：结算段数":"Context: resolutions","上下文：消息条数":"Context: messages",
+  "保存":"Save","测试连接":"Test","保存并测试":"Save & test",
+  "网页配置":"web UI","来自环境变量":"env vars","未配置":"not configured",
+  "读取配置失败：{msg}":"Failed to load settings: {msg}",
+  "已保存，立即生效（不用重启）":"Saved — in effect immediately (no restart)",
+  "已保存，但还缺 Base URL 或模型名":"Saved, but Base URL or model is still missing",
+  "模型配置已保存":"Model settings saved",
+  "保存失败：{msg}":"Save failed: {msg}",
+  "正在真发一次请求…":"Sending one real request…",
+  "通了 · {ms}ms · {who} · {n} token{tail}":"OK · {ms}ms · {who} · {n} tokens{tail}",
+  " · 回复「{t}」":" · replied “{t}”",
+  "连不上：{msg}":"Unreachable: {msg}",
+  "测试失败：{msg}":"Test failed: {msg}",
+  "推一轮":"Run a turn","看上下文":"Show context",
+  "已刷新":"Refreshed",
+  "模型 {p} ｜ 来源 {s}":"Model {p} ｜ from {s}",
+  " ｜ 单座位 ¥{a}":" ｜ per seat ¥{a}",
+  " · 全场 ¥{b}":" · match ¥{b}"," · 全场不限":" · match unlimited",
+  " ｜ 已用 ¥{c} · {t} token":" ｜ spent ¥{c} · {t} tokens",
+  " ｜ 上下文窗口 {h} 段结算 / {m} 条消息":" ｜ context window {h} resolutions / {m} messages",
+  "还没有配置模型：展开下面的「接入设置」填 Base URL 与模型名，存一次即生效；只想离线演练就把接入方式改成「离线脚本」。":
+    "No model configured yet: open “Connection” below, fill in Base URL and model, save once. For offline drills switch Mode to “Offline script”.",
+  "{n} 次":"{n} calls","思考中 · ":"thinking · ",
+  " · 降级 {n}":" · {n} fallback(s)"," · 截断 {n}":" · {n} truncated",
+  "已停用":"disabled","人类操作":"human",
+  "{p} 已交给模型":"{p} handed to the AI","{p} 已暂停，账还留着":"{p} paused — usage stays on the books",
+  "读取失败：{msg}":"Load failed: {msg}",
+  "本阶段没有待行动的模型座位（后台会自动推进）":"No AI seat had anything to do this phase (the background loop advances it)",
+  "已行动":"acted","失败":"failed",
+  "{p} 的上下文：{c} 字 ≈ {t} token（保留 {h} 段结算 / {m} 条消息{own}，略去 {dh} 段历史 / {dm} 条消息）\n":
+    "{p}'s context: {c} chars ≈ {t} tokens (kept {h} resolutions / {m} messages{own}, dropped {dh} history / {dm} messages)\n",
+  " / 自己发出 {n} 封":" / {n} sent by you",
+
+  // ---- 管理页 ----
+  "分发座位（一人一条，各自只看得到自己那国）":"Seat links (one each; every player sees only their own power)",
+  "生成 7 条座位链接":"Generate 7 seat links","换掉全部令牌":"Rotate all tokens",
+  "生成观战链接":"Generate watch link","换一把观战码":"Rotate watch code",
+  "对局控制":"Match control","暂停 / 继续":"Pause / resume","强制结算":"Force resolve",
+  "复制":"Copy",
+  "{p} 的链接已复制":"{p}'s link copied",
+  "浏览器不允许写剪贴板，请手动选中复制":"The browser blocked clipboard access — select and copy manually",
+  "已换 {n} 把，旧链接立即失效":"Rotated {n} token(s) — old links are dead",
+  "观战链接已复制":"Watch link copied",
+  "观战码已更换，旧链接已失效":"Watch code rotated — old links are dead",
+  "已暂停：阶段时钟停走，交令也暂停结算":"Paused: the phase clock stops and submissions no longer resolve",
+  "已继续":"Resumed",
+  "已强制结算，进入下一阶段":"Forced a resolution — now in the next phase",
+  "没能推进（可能对局已结束或处于暂停）":"Could not advance (the game may be over or paused)",
+  "新局已开始":"New game started",
+  "令牌已更新，已重新同步座位":"Tokens refreshed — seats re-synced",
+  "这条座位链接已作废（房主换过令牌）。请向房主要一条新链接；在此期间你可以先围观。":
+    "This seat link is dead (the host rotated tokens). Ask the host for a new one; you can watch in the meantime.",
+
+  // ---- 空状态 ----
+  "对局还没开始":"No game yet",
+  "房主开局后，这一页会自动开始显示战况。":"Once the host starts a game, this page fills in by itself.",
+  "等房主开局后刷新本页即可。":"Refresh once the host starts a game.",
+  "尚未开局":"Not started",
+  "本服务已启用管理员密钥：在右上角输入后按回车即可开局。":"This server requires an admin key: type it in the top right and press Enter to start.",
+  "服务还没启动或对局未创建。":"The server is not up, or no game has been created.",
+
+  // ---- 服务端提示 ----
+  // 服务端只讲中文（单一真相，`X-Err` 才是给机器看的协议），所以 `api()` 把 `detail`
+  // 过一遍 T()；这里没收录的技术细节（引擎校验那类）原样露出来，不硬译。
+  "还没有开局，请先新建对局":"No game yet — start one first.",
+  "缺少座位令牌":"Seat token missing.",
+  "座位令牌无效或已被轮换：请向房主索取新链接":
+    "This seat token is invalid or was rotated — ask the host for a new link.",
+  "需要管理员密钥：请在页面右上角填写，或传 X-Admin-Key 请求头":
+    "Admin key required: enter it in the top right, or send an X-Admin-Key header.",
+  // 键必须写成**字面量**（对象字面量里不能放 `"a" + "b"` 当键，那是语法错误），
+  // 所以这两条长句的键各占一行——换了别的写法整页就是 SyntaxError，而页面照样返回 200，
+  // 看起来只是「所有东西都不动了」。
+  "未设置 ADMIN_KEY 且监听在非回环地址：管理面已锁定。请加 -e ADMIN_KEY=<长随机串> 后重启；只在本机玩就把监听改回 127.0.0.1。":
+    "No ADMIN_KEY set and the listener is not loopback-only, so the admin surface is locked. "
+    +"Restart with -e ADMIN_KEY=<a long random string>; playing locally only? bind to 127.0.0.1 again.",
+  "发言需要观战码：向房主要一条观战链接（/?watch=<码>）。":
+    "Speaking needs a watch code — ask the host for a watch link (/?watch=<code>).",
+  "未配置模型：在「模型」页签填 Base URL 与模型名（存一次即生效），或用 LLM_PROVIDER=scripted 做离线演练":
+    "No model configured: fill in Base URL and model name under AI (saved once, effective immediately), "
+    +"or use LLM_PROVIDER=scripted for an offline rehearsal.",
+};
+
+// 标签页之外，还有些整段 HTML 带内联标记（`<b>`、`<code>`、`<br>`）。按句子片段翻译会把
+// 英文语序拼错，所以这几块整段替换——原文在启动时存下来，切回中文再原样放回去。
+const EN_HTML={
+  "brand":"Seven <b>Powers</b>",
+  "watchAdminHint":
+    "A watch link grants exactly two things: see the board, speak in the watch channel. It carries no seat token "
+    +"and no private letters. Anyone holding it can speak, so control who you forward it to; if it leaks, click "
+    +"“Rotate watch code” and every old link dies at once.",
+  "warnBody":
+    "<b>This deployment is reachable from the network but has no admin key — the admin surface is locked.</b><br>"
+    +"Starting a game, resetting, issuing seat links and changing model settings all return 403 now; "
+    +"outsiders can only watch.<br>"
+    +"That way, even unattended, nobody can grab all 7 seat tokens in one go and read every private letter, "
+    +"and nobody can wipe the save file.<br>"
+    +"To start a game, add <code>-e ADMIN_KEY=&lt;a long random string&gt;</code> and restart, then enter the same "
+    +"string in the top right. Playing locally only? Map the port to <code>-p 127.0.0.1:8080:8080</code> and click "
+    +"“Dismiss” on the right.",
+  "watchIdle":
+    "Spectators only watch: the board and resolutions are public; orders and private letters are out of reach. "
+    +"To speak, use the <code>/?watch=…</code> link the host sent you.",
+  "linkHint":
+    "Send each link to its player separately. A link carries that power's token — whoever holds it can read that "
+    +"power's letters and submit its orders, so <b>never broadcast them</b>. The recipient can only see their own "
+    +"power and cannot switch.<br>"
+    +"If a link leaked into a group chat, or someone's access should end, click “Rotate all tokens”: all seven keys "
+    +"die at once. The board, letters, spectators and AI seats are unaffected — you just have to resend the new links.",
+  "llmHint":
+    "“Test” really sends one tiny request, which separates “wrong URL / wrong model / bad key” — on this page all "
+    +"three used to look like “nothing happened”. Testing never overwrites the saved settings.<br>"
+    +"“Output cap” is the total budget <b>including reasoning tokens</b>: a reasoning model spends one or two thousand "
+    +"tokens thinking first, and a small cap comes back with an empty body (the page can only say “no parsable JSON”). "
+    +"When you hit the wall, look at the body: <b>not a single word</b> means it is still thinking — tell it not to "
+    +"reason and answer directly; <b>half written</b> means the cap really is too small. Every attempt is billed.<br>"
+    +"There are two budgets: <b>per seat</b> for each power, and <b>match</b> for the total (once hit, all seats switch "
+    +"to holding — the game goes on, it just stops spending).<br>"
+    +"Stored in <code id=\"cfgPath\">data/llm.json</code> — it contains the key, so never commit it.",
+  "llmSeatsHint":
+    "Tick a box to hand that power to the AI; untick to take it back.<br>"
+    +"Each turn a model sees “the last 3 resolutions + the last 30 messages + the board”; older history is squashed "
+    +"into a one-line summary — that is what keeps the cost in check.<br>"
+    +"If output is unusable or the budget runs out, the seat falls back to a legal hold, so the game never stalls.",
+  "adminHint":
+    "Force resolve treats every power that has not submitted as holding, then advances immediately — use it when "
+    +"someone drops offline instead of waiting.",
+};
+
+function T(zh, vars){
+  const v=lang==="en"?(EN[zh]!==undefined?EN[zh]:zh):zh;
+  const s=(typeof v==="function")?v(vars||{}):v;
+  return vars?s.replace(/\{(\w+)\}/g,(m,k)=>(vars[k]!==undefined?vars[k]:m)):s;
+}
+
+// 静态壳：启动时把原文记下来，之后只在原文与译文之间来回切。
+// 只认**整段**匹配——不做子串替换，否则「简报」会被塞进任何含这两个字的长句里。
+const STATIC_TEXT=[], STATIC_ATTR=[], STATIC_HTML=[];
+const CJK=/[\u4e00-\u9fff]/;
+// 服务端「没有符合条件的消息」的原文。复盘页要把它换成更贴合的说法，所以得先认得出这一句。
+const ZH_INBOX_EMPTY="没有符合条件的消息。";
+
+function snapshotStatic(){
+  STATIC_TEXT.length=STATIC_ATTR.length=STATIC_HTML.length=0;
+  document.querySelectorAll("[data-i18n-html]").forEach(el=>{
+    STATIC_HTML.push([el, el.getAttribute("data-i18n-html"), el.innerHTML]);
+  });
+  const walker=document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for(let n=walker.nextNode();n;n=walker.nextNode()){
+    if(!CJK.test(n.nodeValue)) continue;
+    const p=n.parentElement;
+    if(!p||p.closest("script,style,[data-i18n-html]")) continue;
+    STATIC_TEXT.push([n, n.nodeValue]);
+  }
+  document.querySelectorAll("[placeholder],[title],[aria-label]").forEach(el=>{
+    for(const a of ["placeholder","title","aria-label"]){
+      const v=el.getAttribute(a);
+      if(v&&CJK.test(v)) STATIC_ATTR.push([el, a, v]);
+    }
+  });
+}
+
+function applyStatic(){
+  for(const [n,orig] of STATIC_TEXT){
+    // 保留首尾空白：那些空格属于排版，不是句子
+    const m=orig.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    const core=m[2], en=EN[core];
+    n.nodeValue=lang==="en"&&en!==undefined&&typeof en==="string"?m[1]+en+m[3]:orig;
+  }
+  for(const [el,a,orig] of STATIC_ATTR){
+    const en=EN[orig.trim()];
+    el.setAttribute(a, lang==="en"&&typeof en==="string"?en:orig);
+  }
+  for(const [el,key,orig] of STATIC_HTML){
+    el.innerHTML=lang==="en"&&EN_HTML[key]!==undefined?EN_HTML[key]:orig;
+  }
+  document.documentElement.lang=lang==="en"?"en":"zh";
+  document.title=lang==="en"?"Seven Powers · Diplomacy":"七国纵横 · 外交";
+  const b=$("#btnLang");
+  if(b){
+    b.textContent=lang==="en"?"中文":"EN";
+    b.title=lang==="en"?"切换到中文":"Switch to English";
+  }
+}
+
+// 启动点放在 `$` 之后（`applyStatic` 要用它查按钮）。这一刻还没人往页面上写过字，
+// 所以抓到的是**原文**；等到 boot 再抓，就会把 paintTheme 写进去的英文当成原文，
+// 切回中文时反而删不掉。
+
+// 国名：唯一可翻译的地方。引擎代号（命令、存档、令牌、API 参数）一律不进这个函数。
+const POWERS=[["AUSTRIA","奥地利","Austria","a"],["ENGLAND","英国","England","e"],
+              ["FRANCE","法国","France","f"],["GERMANY","德国","Germany","g"],
+              ["ITALY","意大利","Italy","i"],["RUSSIA","俄国","Russia","r"],
+              ["TURKEY","土耳其","Turkey","t"]];
+const ZH_NAME=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
+const EN_NAME=Object.fromEntries(POWERS.map(([c,,e])=>[c,e]));
+const powerName=c=>(lang==="en"?(EN_NAME[c]||c):(ZH_NAME[c]||c));
+// `NAME[code]` 是这个文件里到处在用的写法；做成 getter，切语言后所有旧调用点自动跟上。
+const NAME={};
+POWERS.forEach(([c])=>Object.defineProperty(NAME,c,{enumerable:true,get:()=>powerName(c)}));
 const KEY="dw.prefs.v1", BOUND="dw.bound.v1", WATCH="dw.watch.v1", WNAME="dw.wname.v1";
 let tokens={}, seat="ITALY", timer=null, busy=false, adminKey="";
 let es=null, pushT=null, sseOk=false;
@@ -466,6 +859,7 @@ let health=null;
 
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+snapshotStatic(); applyStatic();
 
 function toast(msg,kind=""){const t=$("#toast");t.textContent=msg;t.className="show "+kind;clearTimeout(t._h);t._h=setTimeout(()=>t.className="",4200);}
 
@@ -474,13 +868,23 @@ async function api(path,opt={}){
   if(tokens[seat]) h["X-Seat-Token"]=tokens[seat];
   if(adminKey) h["X-Admin-Key"]=adminKey;
   if(watchKey) h["X-Spectate-Key"]=watchKey;
+  // 简报、结算、任务提示都由服务端按这个头生成；不传就是中文默认。
+  h["X-Lang"]=lang;
   if(opt.body) h["Content-Type"]="application/json";
   const r=await fetch(path,Object.assign({},opt,{headers:h}));
   const txt=await r.text();
   let d={}; try{d=JSON.parse(txt)}catch(e){d={detail:txt.slice(0,300)}}
   if(!r.ok){
-    if(r.status===403 && String(d.detail||"").includes("管理员密钥")) showAdmin(true);
-    throw new Error(d.detail||("HTTP "+r.status));
+    // 分支要走 `err` 码，不能走中文文案：切到英文后 `detail` 是英文，
+    // 而 `includes("还没有开局")` 会静默变成 false，页面就把「还没开局」报成「连接失败」。
+    const err=r.headers.get("X-Err")||"";
+    if(err==="admin_key") showAdmin(true);
+    // 服务端只讲中文（`X-Err` 才是协议），所以这里把整句过一遍词典：认识就翻，
+    // 不认识的原样露出来——引擎校验那种带行号的技术细节，机器翻只会更难看懂。
+    const e=new Error(T(d.detail||("HTTP "+r.status)));
+    e.err=err;
+    e.raw=d.detail||"";
+    throw e;
   }
   return d;
 }
@@ -539,7 +943,7 @@ function takeWatchLink(){
 }
 
 function applyBound(){
-  $("#boundTag").textContent="已绑定："+NAME[bound.power];
+  $("#boundTag").textContent=T("已绑定：{p}",{p:NAME[bound.power]});
   $("#boundTag").classList.remove("hidden");
   $("#btnUnbind").classList.remove("hidden");
   // 玩家不该看见的东西：开新局、模型/管理两个标签、管理密钥输入、部署告警
@@ -547,7 +951,7 @@ function applyBound(){
   document.querySelectorAll('[data-tab="llm"],[data-tab="admin"]').forEach(el=>el.classList.add("hidden"));
   ["#pane-llm","#pane-admin"].forEach(sel=>$(sel).classList.add("hidden"));
   if(location.hash==="#llm"||location.hash==="#admin") document.querySelector('[data-tab="brief"]').click();
-  $("#banner").textContent="你是"+NAME[bound.power]+"：只持有本国令牌，别国的私信看不到，也切不过去。";
+  $("#banner").textContent=T("你是 {p}：只持有本国令牌，别国的私信看不到，也切不过去。",{p:NAME[bound.power]});
 }
 
 // ---- 观战模式：没有座位、也没有管理权限时落到这里 ----
@@ -567,7 +971,7 @@ function applyRole(){
   });
   $("#btnNew").classList.toggle("hidden",viewer||player);
   const briefTab=document.querySelector('[data-tab="brief"]');
-  if(briefTab) briefTab.textContent=viewer?"战况":"简报";
+  if(briefTab) briefTab.textContent=T(viewer?"战况":"简报");
 }
 
 function applyViewer(h, why){
@@ -583,15 +987,15 @@ function applyViewer(h, why){
   $("#adminKey").classList.toggle("hidden",!canKey);
   $("#banner").classList.remove("hidden");
   $("#banner").textContent=why || (canKey
-    ? "观战模式：局面与结算公开。房主设了管理密钥——在右上角填入即可建局。"
-    : "观战模式：局面与结算公开，交令与私信一概碰不到。"
-      +(watchKey?"你持有观战码，可以在「观战」里发言。":"要发言需要一个观战码。"));
+    ? T("观战模式：局面与结算公开。房主设了管理密钥——在右上角填入即可建局。")
+    : T("观战模式：局面与结算公开，交令与私信一概碰不到。")
+      +(watchKey?T("你持有观战码，可以在「观战」里发言。"):T("要发言需要一个观战码。")));
   const cur=(location.hash||"").replace("#","");
   if(VIEWER_GONE.includes(cur)) document.querySelector('[data-tab="brief"]')?.click();
 }
 
 $("#btnUnbind").onclick=()=>{
-  if(!confirm("退出绑定后会回到热座模式（需要重新建局/输入密钥），确定？")) return;
+  if(!confirm(T("退出绑定后会回到热座模式（需要重新建局/输入密钥），确定？"))) return;
   localStorage.removeItem(BOUND);
   location.href=location.pathname;
 };
@@ -605,34 +1009,36 @@ $("#adminKey").onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); boot(); }
 
 function renderSeats(st){
   const el=$("#seats");
-  el.innerHTML=POWERS.map(([c,n,k])=>{
+  el.innerHTML=POWERS.map(([c,,,k])=>{
     const p=st?.players?.[c]||{};
     const cnt=st?.centers?.[c]??0, un=st?.units?.[c]??0;
     const dead=p.active===false?" dead":"";
-    const ready=p.ready?"<span class='rd'>已交</span>":"";
+    const ready=p.ready?`<span class='rd'>${T("已交")}</span>`:"";
     return `<div class="seat${seat===c?" on":""}${dead}" data-p="${c}">
       <span class="dot" style="background:var(--${k})"></span>
-      <span class="nm">${n}${llmSeats[c]?"<i class='llmtag'>模型</i>":""}${ready}</span>
-      <span class="cnt">${cnt}城/${un}军</span>
+      <span class="nm">${NAME[c]}${llmSeats[c]?`<i class='llmtag'>${T("模型")}</i>`:""}${ready}</span>
+      <span class="cnt">${T("{c}城/{u}军",{c:cnt,u:un})}</span>
     </div>`;
   }).join("");
   el.querySelectorAll(".seat").forEach(e=>{
-    if(role==="viewer"){ e.classList.add("locked"); e.title="观战者不能切国家"; return; }
-    if(bound&&e.dataset.p!==bound.power){ e.classList.add("locked"); e.title="该座位由其他人操作"; return; }
+    if(role==="viewer"){ e.classList.add("locked"); e.title=T("观战者不能切国家"); return; }
+    if(bound&&e.dataset.p!==bound.power){ e.classList.add("locked"); e.title=T("该座位由其他人操作"); return; }
     e.onclick=()=>{seat=e.dataset.p;save();renderSeats(st);refresh();};
   });
-  const opts=POWERS.filter(([c])=>c!==seat).map(([c,n])=>`<option value="${c}">${n}</option>`).join("");
-  $("#sendTo").innerHTML=opts+"<option value='GLOBAL'>GLOBAL（全体公开）</option>";
+  const opts=POWERS.filter(([c])=>c!==seat).map(([c])=>`<option value="${c}">${NAME[c]}</option>`).join("");
+  $("#sendTo").innerHTML=opts+`<option value='GLOBAL'>${T("GLOBAL（全体公开）")}</option>`;
   $("#sendLimit").textContent=300;
-  $("#inboxWith").innerHTML="<option value=''>全部</option>"+opts;
+  $("#inboxWith").innerHTML=`<option value=''>${T("全部")}</option>`+opts;
 }
 
 function renderBrief(text){
+  // 这两句是服务端按语言出的文案，所以两种都要认：只认中文会在英文界面里丢掉高亮。
+  const submitted=["你已提交","You submitted"];
   return text.split("\n").map(l=>{
     if(l.startsWith("====")) return `<div class="ln h1">${esc(l)}</div>`;
     if(l.startsWith("【")) return `<div class="ln h2">${esc(l)}</div>`;
     if(l.startsWith("——")) return `<div class="ln sep">${esc(l)}</div>`;
-    if(l.startsWith("你已提交")) return `<div class="ln me">${esc(l)}</div>`;
+    if(submitted.some(s=>l.startsWith(s))) return `<div class="ln me">${esc(l)}</div>`;
     return `<div class="ln">${esc(l)||"&nbsp;"}</div>`;
   }).join("");
 }
@@ -641,7 +1047,7 @@ function renderBrief(text){
 // 增量拉取：带 after=<lastId> 只取新的，避免每 5 秒重绘整屏把正在看的那行顶走。
 function renderWatch(){
   const el=$("#watchList");
-  if(!watchMessages.length){ el.innerHTML='<div class="empty">还没有人说话。</div>'; return; }
+  if(!watchMessages.length){ el.innerHTML=`<div class="empty">${T("还没有人说话。")}</div>`; return; }
   el.innerHTML=watchMessages.map(m=>
     `<div class="cm"><span class="who">${esc(m.name)}</span><span class="at">${esc(m.at||"")}`
     + `${m.phase?" · "+esc(m.phase):""}</span><div>${esc(m.text)}</div></div>`
@@ -663,17 +1069,17 @@ async function loadWatch(reset){
     btn.classList.toggle("hidden",!d.can_say);
     tip.classList.toggle("hidden",!!d.can_say);
     if(d.can_say){
-      $("#watchHead").textContent="观战频道：你可以发言。";
+      $("#watchHead").textContent=T("观战频道：你可以发言。");
       $("#btnWatchKey").classList.add("hidden");
       $("#watchKey").classList.add("hidden");
     }else{
       $("#watchHead").textContent=d.has_key
-        ? "观战频道：房主已开放发言，填观战码即可参与。"
-        : "观战频道：房主还没生成观战码，现在只能看。";
+        ? T("观战频道：房主已开放发言，填观战码即可参与。")
+        : T("观战频道：房主还没生成观战码，现在只能看。");
       $("#btnWatchKey").classList.remove("hidden");
       tip.textContent=d.has_key
-        ? "只能看：要发言请填房主发的观战码（链接形如 /?watch=…）。"
-        : "只能看：房主还没生成观战码（在「管理」页生成一条观战链接）。";
+        ? T("只能看：要发言请填房主发的观战码（链接形如 /?watch=…）。")
+        : T("只能看：房主还没生成观战码（在「管理」页生成一条观战链接）。");
     }
   }catch(e){ /* 频道是次要功能，拉不到不该弹条打断对局 */ }
 }
@@ -703,7 +1109,7 @@ $("#btnWatchKey").onclick=async()=>{
   localStorage.setItem(WATCH,code);
   box.value=""; box.classList.add("hidden");
   await loadWatch(true);
-  toast("观战码已保存，可以发言了","ok");
+  toast(T("观战码已保存，可以发言了"),"ok");
 };
 
 let lastErr="";
@@ -723,8 +1129,8 @@ $("#warnBrief").onclick=()=>{localStorage.removeItem(WARNMINI);$("#warn").classL
 
 // 页头那行状态：结束/暂停要说出来，不然玩家只看到倒计时没了，不知道是被冻住还是在等
 function phaseText(st){
-  if(st.game_over) return "已结束 · "+(st.result_text||"");
-  return st.paused ? st.phase+" · 已暂停" : st.phase;
+  if(st.game_over) return T("已结束 · ")+(st.result_text||"");
+  return st.paused ? st.phase+T(" · 已暂停") : st.phase;
 }
 
 async function refresh(){
@@ -744,15 +1150,15 @@ async function refresh(){
       await loadWatch(false);
       if(st.game_over&&!$("#banner").dataset.over){
         $("#banner").dataset.over="1";
-        $("#banner").textContent="对局已结束："+(st.result_text||"");
+        $("#banner").textContent=T("对局已结束：")+(st.result_text||"");
       }
       lastErr="";
     }catch(e){
-      const noMatch=String(e.message||"").includes("还没有开局");
-      $("#phase").textContent=noMatch?"等待房主开局":"连接失败";
+      const noMatch=e.err==="no_match";
+      $("#phase").textContent=noMatch?T("等待房主开局"):T("连接失败");
       if(noMatch&&!lastErr){
-        $("#brief").innerHTML='<div class="ln h2">对局还没开始</div>'
-          +'<div class="ln">房主开局后，这一页会自动开始显示战况。</div>';
+        $("#brief").innerHTML=`<div class="ln h2">${T("对局还没开始")}</div>`
+          +`<div class="ln">${T("房主开局后，这一页会自动开始显示战况。")}</div>`;
       }else if(e.message!==lastErr){ toast(e.message,"err"); lastErr=e.message; }
     }
     return;
@@ -760,7 +1166,7 @@ async function refresh(){
   if(!tokens[seat]){
     // 还没建局（多半是等管理密钥）：把空状态画出来，别让页面看着像坏了
     renderSeats(null);
-    $("#phase").textContent=adminKey?"等待开局":"等待管理密钥";
+    $("#phase").textContent=adminKey?T("等待开局"):T("等待管理密钥");
     return;
   }
   try{
@@ -773,17 +1179,19 @@ async function refresh(){
     $("#brief").innerHTML=renderBrief(b.text);
     // 地图开着就跟着刷新：部队会动、中心会易主，用户看不到「图是上一阶段的」
     if($("#pane-map").classList.contains("on")) loadMap();
+    // 军令页开着就跟着刷新：部队会动，上一阶段的按钮可能已经指向不存在的部队
+    if($("#pane-orders").classList.contains("on")) loadOrders();
     if($("#pane-watch").classList.contains("on")) loadWatch(false);
     if(st.game_over){
       $("#banner").classList.remove("hidden");
-      $("#banner").textContent="对局已结束："+(st.result_text||"")
-        + (bound?"":"　点右上「新局」重开。");
+      $("#banner").textContent=T("对局已结束：")+(st.result_text||"")
+        + (bound?"":T("点右上「新局」重开。"));
       deadlineAt=0; $("#deadline").classList.add("hidden");
     }
     lastErr="";
   }catch(e){
     const msg=String(e.message||"");
-    if(msg.includes("已被轮换")||msg.includes("令牌无效")){
+    if(e.err==="bad_token"){
       if(role==="admin"){
         // 热座模式下房主自己也可能握着旧令牌（在另一个标签页/另一台机器上换了钥匙）。
         // 管理面随时能拿到当前令牌，重新同步一次就好——把自己踢成观众纯属自伤。
@@ -792,7 +1200,7 @@ async function refresh(){
           tokens=d.tokens;
           if(!tokens[seat]) seat="ITALY";
           save();
-          toast("令牌已更新，已重新同步座位","ok");
+          toast(T("令牌已更新，已重新同步座位"),"ok");
           return;
         }catch(e2){ /* 同步不了就落到下面当观众 */ }
       }
@@ -803,16 +1211,15 @@ async function refresh(){
       // 「已绑定：法国」的牌子留着会骗人——那顶帽子已经没了
       $("#boundTag").classList.add("hidden");
       $("#btnUnbind").classList.add("hidden");
-      applyViewer(health,"这条座位链接已作废（房主换过令牌）。"
-        +"请向房主要一条新链接；在此期间你可以先围观。");
+      applyViewer(health,T("这条座位链接已作废（房主换过令牌）。请向房主要一条新链接；在此期间你可以先围观。"));
       deadlineAt=0;
       if(msg!==lastErr){ toast(msg,"err"); lastErr=msg; }
       return;
     }
-    const noMatch=msg.includes("还没有开局");
-    $("#phase").textContent=noMatch?"等待房主开局":"连接失败";
+    const noMatch=e.err==="no_match";
+    $("#phase").textContent=noMatch?T("等待房主开局"):T("连接失败");
     if(noMatch){
-      $("#brief").innerHTML='<div class="ln h2">对局还没开始</div><div class="ln">等房主开局后刷新本页即可。</div>';
+      $("#brief").innerHTML=`<div class="ln h2">${T("对局还没开始")}</div><div class="ln">${T("等房主开局后刷新本页即可。")}</div>`;
       renderSeats(null);
     }else if(e.message!==lastErr){ toast(e.message,"err"); lastErr=e.message; }
   }
@@ -824,8 +1231,8 @@ function setLive(on){
   sseOk=on;
   const el=$("#live");
   el.className="tag"+(on?" live":"");
-  el.textContent=on?"实时":"轮询";
-  el.title=on?"已连上推送：局面一变就刷新":"推送不可用，退回 5 秒轮询";
+  el.textContent=on?T("实时"):T("轮询");
+  el.title=on?T("已连上推送：局面一变就刷新"):T("推送不可用，退回 5 秒轮询");
   // 连上就放宽兜底轮询（漏帧时仍能自愈），断开立刻回到 5 秒
   clearInterval(timer);
   timer=setInterval(refresh,on?30000:5000);
@@ -845,7 +1252,9 @@ function onPush(st){
 function openStream(){
   if(!window.EventSource) return;
   if(es) es.close();
-  es=new EventSource("/api/events");
+  // `EventSource` 不能自定义请求头，所以语言走查询串——推送里带着终局那句话，
+  // 只有这一处没法复用 `X-Lang`。切语言时重开一条流即可。
+  es=new EventSource("/api/events?lang="+encodeURIComponent(lang));
   es.addEventListener("state",e=>{
     let d={}; try{d=JSON.parse(e.data)}catch(err){ return; }
     onPush(d);
@@ -865,7 +1274,7 @@ function setDeadline(st){
   if(s===null||s===undefined){ deadlineAt=0; el.classList.add("hidden"); return; }
   deadlineAt=Date.now()+s*1000;
   el.classList.remove("hidden");
-  el.textContent="剩余 "+fmtLeft(Math.max(0,Math.round(s)));
+  el.textContent=T("剩余 {t}",{t:fmtLeft(Math.max(0,Math.round(s)))});
 }
 
 // 本地每秒走一格，不然 5 秒轮询下倒计时会一跳一跳
@@ -873,9 +1282,53 @@ setInterval(()=>{
   if(!deadlineAt) return;
   const left=Math.max(0,Math.round((deadlineAt-Date.now())/1000));
   const el=$("#deadline");
-  el.textContent="剩余 "+fmtLeft(left);
+  el.textContent=T("剩余 {t}",{t:fmtLeft(left)});
   el.classList.toggle("warn",left<=30);
 },1000);
+
+// 切语言：静态壳原位替换，动态文案各自重取一次。
+// 刻意不整页刷新——刷新会把「正在打的这一局、开着的页签、写了一半的军令草稿」一起丢掉。
+async function applyLang(next){
+  lang=next;
+  localStorage.setItem(LANG_KEY,lang);
+  applyStatic();
+  // 有些静态文案其实是 JS 写的（页签在观众模式下叫「战况」、主题按钮分日/夜）。
+  // 它们用 `textContent=` 重建过节点，`applyStatic` 手里的是脱离文档的旧节点，
+  // 写进去看不见——所以由各自的拥有者再写一遍。
+  applyRole();
+  paintTheme(document.documentElement.dataset.theme==="light"?"light":"dark");
+  if(bound) applyBound();
+  else if(role==="viewer") applyViewer(health);
+  ["#legalOut","#inboxOut","#ctxOut"].forEach(sel=>{
+    const el=$(sel);
+    if(el&&!el.classList.contains("hidden")) el.textContent="—";
+  });
+  // 地图页那句「还没选中部队」也是 JS 写的，`renderActs` 才是它的拥有者；
+  // 页签没打开时 `loadMap` 不跑，这句就会停在上一种语言里。
+  // 但 `bd` 为空不等于「没开局」——房主从没打开过地图页时它也是空，直接交给
+  // `renderActs` 会把「对局还没开始」写在正在进行的对局上，所以先判一次。
+  if(bd) renderActs();
+  else $("#mapSel").textContent=T("还没有选中部队。带圆点的是补给中心，填充色是归属国。");
+  // 上一条提示是旧语言的一次性消息，留着只会挡字。但只清文字会留下一个**空的白框**
+  // （`#toast.show` 把 opacity 拉到 1 了），所以连 class 和定时器一起收掉。
+  {
+    const t=$("#toast");
+    t.textContent=""; t.className=""; clearTimeout(t._h);
+  }
+  renderSeats(lastState);
+  renderOrders();
+  // 结束横幅是「只写一次」的（`dataset.over` 挡住重复写）；不清掉标记，
+  // 换语言后它会永远停在旧语言里——它已经用 textContent 覆盖过快照节点了。
+  delete $("#banner").dataset.over;
+  if(tokens[seat]||role==="viewer") await refresh();
+  else $("#phase").textContent=adminKey?T("等待开局"):T("等待管理密钥");
+  if(!bound) await loadLlm();
+  if($("#pane-map").classList.contains("on")) loadMap();
+  if($("#pane-replay").classList.contains("on")) loadReplay();
+  loadWatch(false);
+  openStream();   // 流里带着语言，换一条才拿得到新语言的推送
+}
+$("#btnLang").onclick=()=>applyLang(lang==="en"?"zh":"en");
 
 async function boot(){
   load(); takeWatchLink(); pickBound();
@@ -904,19 +1357,19 @@ async function boot(){
         const msg=String(e.message||"");
         applyViewer(h);
         if(h.admin_locked) renderWarn(h);
-        else if(!(msg.includes("管理员密钥"))) toast("观战模式："+msg,"err");
+        else if(e.err!=="admin_key") toast(T("观战模式：{msg}",{msg}),"err");
       }
     }
     await refresh();
   }catch(e){
-    const needKey=String(e.message||"").includes("管理员密钥");
-    toast(needKey ? "需要管理密钥：请在右上角输入后按回车"
-        : (bound ? "连不上服务："+e.message : "连不上服务："+e.message),"err");
-    $("#phase").textContent=needKey?"等待管理密钥":"连接失败";
-    $("#brief").innerHTML='<div class="ln h2">尚未开局</div><div class="ln">'
+    const needKey=e.err==="admin_key";
+    toast(needKey ? T("需要管理密钥：请在右上角输入后按回车")
+        : T("连接失败：{msg}",{msg}),"err");
+    $("#phase").textContent=needKey?T("等待管理密钥"):T("连接失败");
+    $("#brief").innerHTML=`<div class="ln h2">${T("尚未开局")}</div><div class="ln">`
       + (needKey
-          ? "本服务已启用管理员密钥：在右上角输入后按回车即可开局。"
-          : "服务还没启动或对局未创建。")
+          ? T("本服务已启用管理员密钥：在右上角输入后按回车即可开局。")
+          : T("服务还没启动或对局未创建。"))
       + "</div>";
     renderSeats(null);
   }
@@ -931,6 +1384,7 @@ document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==="llm") loadLlm();
   if(b.dataset.tab==="replay") loadReplay();
   if(b.dataset.tab==="map") loadMap();
+  if(b.dataset.tab==="orders") loadOrders();
   if(b.dataset.tab==="watch") loadWatch(true);
 });
 (function initTab(){
@@ -944,10 +1398,10 @@ $("#sendText").oninput=()=>{$("#sendCount").textContent=$("#sendText").value.len
 
 $("#btnSend").onclick=async()=>{
   const to=$("#sendTo").value, text=$("#sendText").value.trim();
-  if(!text) return toast("正文不能为空","err");
+  if(!text) return toast(T("正文不能为空"),"err");
   try{
     const d=await api("/api/send",{method:"POST",body:JSON.stringify({to,text})});
-    toast(d.result.text+(d.settled?"\n本阶段已结算":"") ,"ok");
+    toast(d.result.text+(d.settled?"\n"+T("本阶段已结算"):"") ,"ok");
     $("#sendText").value=""; $("#sendCount").textContent="0";
     await refresh();
   }catch(e){ toast(e.message,"err"); }
@@ -957,7 +1411,7 @@ $("#btnOrders").onclick=async()=>{
   const raw=$("#ordersText").value.split("\n").map(s=>s.trim()).filter(Boolean);
   try{
     const d=await api("/api/orders",{method:"POST",body:JSON.stringify({orders:raw})});
-    toast(d.result.text+(d.settled?"\n本阶段已结算":"") ,"ok");
+    toast(d.result.text+(d.settled?"\n"+T("本阶段已结算"):"") ,"ok");
     await refresh();
   }catch(e){ toast(e.message,"err"); }
 };
@@ -986,17 +1440,17 @@ function showReplayPhase(phase){
   const el=$("#replayOut");
   el.classList.remove("hidden");
   const it=(replayData&&replayData.items||[]).find(i=>i.phase===phase);
-  if(!it){ el.textContent="没有这个阶段。"; return; }
+  if(!it){ el.textContent=T("没有这个阶段。"); return; }
   // inbox 的「没有符合条件的消息。」是给查询接口看的文案，这里换成更贴合复盘的说法
-  const msgs=!it.messages||it.messages==="没有符合条件的消息。"
-    ? "（这一阶段没有你相关的往来信件）" : it.messages;
-  el.textContent=it.text+"\n\n【本阶段你的信件】\n"+msgs;
+  const msgs=!it.messages||it.messages===ZH_INBOX_EMPTY
+    ? T("（这一阶段没有你相关的往来信件）") : it.messages;
+  el.textContent=it.text+"\n\n"+T("【本阶段你的信件】")+"\n"+msgs;
 }
 
 async function loadReplay(){
   if(!tokens[seat]){
     $("#replayOut").classList.remove("hidden");
-    $("#replayOut").textContent="对局还没开始。";
+    $("#replayOut").textContent=T("对局还没开始。");
     return;
   }
   try{
@@ -1006,20 +1460,20 @@ async function loadReplay(){
     const keep=sel.value;
     sel.innerHTML=(d.items||[]).map(it=>{
       const total=Object.values(it.centers||{}).reduce((a,b)=>a+b,0);
-      return `<option value="${it.phase}">第 ${it.index} / ${d.settled} 阶段 · ${it.phase}`
-        + `${it.agreed_draw?"（和局）":""} · ${total} 中心</option>`;
-    }).join("") || '<option value="">还没有结算</option>';
+      return `<option value="${it.phase}">${T("第 {i} / {n} 阶段",{i:it.index,n:d.settled})} · ${it.phase}`
+        + `${it.agreed_draw?T("（和局）"):""} · ${T("{n} 中心",{n:total})}</option>`;
+    }).join("") || `<option value="">${T("还没有结算")}</option>`;
 
     if(!d.items||!d.items.length){
       $("#replayOut").classList.remove("hidden");
-      $("#replayOut").textContent="还没有结算记录。\n当前阶段："+d.current_phase;
+      $("#replayOut").textContent=T("还没有结算记录。\n当前阶段：{p}",{p:d.current_phase});
     }else{
       const pick=(keep&&d.items.some(i=>i.phase===keep))?keep:d.items[d.items.length-1].phase;
       sel.value=pick;
       showReplayPhase(pick);
     }
-    $("#replayMeta").textContent=`你是 ${NAME[d.power]} · 已结算 ${d.settled} 个阶段`
-      + ` · 当前 ${d.current_phase}`+(d.result_text?` · ${d.result_text}`:"");
+    $("#replayMeta").textContent=T("你是 {p} · 已结算 {n} 个阶段",{p:NAME[d.power],n:d.settled})
+      + T(" · 当前 {p}",{p:d.current_phase})+(d.result_text?` · ${d.result_text}`:"");
   }catch(e){ toast(e.message,"err"); }
 }
 
@@ -1055,7 +1509,7 @@ async function exportGame(fmt){
     a.remove();
     // 立刻 revoke 在部分浏览器上会让下载拿到空文件，隔一秒再回收
     setTimeout(()=>URL.revokeObjectURL(url),1000);
-    toast(fmt==="json"?"已导出 JSON":"已导出战报","ok");
+    toast(fmt==="json"?T("已导出 JSON"):T("已导出战报"),"ok");
   }catch(e){ toast(e.message,"err"); }
   finally{ btn.disabled=false; }
 }
@@ -1066,8 +1520,8 @@ $("#btnExportJson").onclick=()=>exportGame("json");
 // 几何只拉一次（服务端从引擎自带 SVG 解析，整局不变）；局面每次进页签、每次推送都重拉——
 // 部队会动，补给中心会易主。点击**不生成**命令，只从 `/api/board` 给的合法串里挑一条，
 // 所以无论怎么点都不可能拼出非法命令。
-const POWER_KEY=Object.fromEntries(POWERS.map(([c,n,k])=>[c,"var(--"+k+")"]));
-const POWER_TAG=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
+const POWER_KEY=Object.fromEntries(POWERS.map(([c,,,k])=>[c,"var(--"+k+")"]));
+
 // 标签是三个大写字母、字号 21：半宽约 0.62em×3/2 ≈ 20，半高约 8（基线在字形底部）
 const LABEL_DX=20, LABEL_DY=8;
 let geo=null, bd=null, sel=null;
@@ -1095,20 +1549,23 @@ const hasOrders=code=>((bd&&bd.mine||{})[code]||[]).length>0;
 // 一条令长什么样：`A PAR - BUR` / `A PAR S A MAR` / `A PAR H`，撤退是 `R`、调整是 `B`/`D`。
 // 第三个词就是动作代码，所以不靠字符串里有没有 " S " 去猜——`A PAR S A MAR - BUR` 和
 // `A PAR C A MAR - SPA` 的落点都在破折号后面，纯支援则没有落点。
+// 标签走 T()：`kind`/`dest` 是给排序去重用的机器字段，`label` 只给人看。
+// 别把 label 拿去比较——它会随语言变，比的是 kind/dest 或原始命令串。
 function parseOrder(o){
   const t=o.trim().split(/\s+/), code=t[2]||"H";
   const dest=t[3]?t[3].split("/")[0]:null;
-  if(code==="-") return {kind:"move",dest,label:"→ "+(dest||"?")+(t[4]==="VIA"?"（经海路）":"")};
-  if(code==="R") return {kind:"retreat",dest,label:"撤退 → "+(dest||"?")};
-  if(code==="H") return {kind:"hold",dest:null,label:"驻守"};
-  if(code==="D") return {kind:"disband",dest:null,label:"解散"};
+  if(code==="-") return {kind:"move",dest,
+    label:t[4]==="VIA"?T("→ {d}（经海路）",{d:dest||"?"}):T("→ {d}",{d:dest||"?"})};
+  if(code==="R") return {kind:"retreat",dest,label:T("撤退 → {d}",{d:dest||"?"})};
+  if(code==="H") return {kind:"hold",dest:null,label:T("驻守")};
+  if(code==="D") return {kind:"disband",dest:null,label:T("解散")};
   // 同一格能造陆军也能造舰队，光写「建造」两个 chip 长得一模一样，得把兵种带上
-  if(code==="B") return {kind:"build",dest:null,label:"建"+(t[0]==="A"?"陆军":"舰队")};
+  if(code==="B") return {kind:"build",dest:null,label:T(t[0]==="A"?"建陆军":"建舰队")};
   const tail=o.split(" - ");
   const at=tail.length>1?tail[1].split(" ")[0].split("/")[0]:null;
   const subject=(o.split(" "+code+" ")[1]||"").replace(" - ","→");
-  if(code==="S") return {kind:"support",dest:at,label:"支援 "+subject};
-  if(code==="C") return {kind:"convoy",dest:at,label:"护航 "+subject};
+  if(code==="S") return {kind:"support",dest:at,label:T("支援 {s}",{s:subject})};
+  if(code==="C") return {kind:"convoy",dest:at,label:T("护航 {s}",{s:subject})};
   return {kind:"other",dest:null,label:o};
 }
 const destOf=o=>parseOrder(o).dest;
@@ -1217,7 +1674,7 @@ function drawMap(){
     if(myUnitAt(code)||hasOrders(code)) cls.push("mine");
     if(sel&&sel.at===code) cls.push("sel");
     else if(sel&&dests.has(code)) cls.push("dest");
-    const tip=`${code} · ${own?"属于"+POWER_TAG[own]:"中立"}${a.sc?" · 补给中心":""}`;
+    const tip=`${code} · ${own?T("属于 {p}",{p:NAME[own]}):T("中立")}${a.sc?T("· 补给中心"):""}`;
     parts.push(`<path class="${cls.join(" ")}" data-loc="${code}" d="${a.d}" fill="${fillOf(code)}"`
       +` fill-opacity="${own?0.45:1}"><title>${tip}</title></path>`);
   }
@@ -1247,22 +1704,23 @@ function drawMap(){
 function renderActs(){
   const box=$("#mapActs"), hint=$("#mapSel");
   box.innerHTML="";
-  if(!bd){ hint.textContent="对局还没开始。"; return; }
+  if(!bd){ hint.textContent=T("对局还没开始。"); return; }
   // 建造阶段满地都是部队，但能点的是「有 B 令的地盘」——提示词得跟着换，否则叫人去点部队
   const canBuild=Object.values(bd.mine||{}).some(l=>l.some(o=>o.split(" ")[2]==="B"));
   if(!sel){
     hint.textContent=canBuild
-      ? "调整阶段：点亮的地盘可以建造，点它选兵种。"
-      : "还没有选中部队。小圆点标的是补给中心，填充色是归属国；金色描边的部队已经下过令。";
+      ? T("调整阶段：点亮的地盘可以建造，点它选兵种。")
+      : T("还没有选中部队。小圆点标的是补给中心，填充色是归属国；金色描边的部队已经下过令。");
     return;
   }
   const list=ordersOf(sel);
-  const who=POWER_TAG[sel.power], ph=bd.phase;
-  hint.textContent=`${ph} · 已选 ${sel.kind?sel.kind+" ":""}${sel.loc}（${who}），${list.length} 个合法动作`
-    +(bd.editable?"":" · 这个阶段不是你的回合");
+  const who=NAME[sel.power], ph=bd.phase;
+  hint.textContent=T("{phase} · 已选 {u}{loc}（{who}），{n} 个合法动作",
+      {phase:ph,u:sel.kind?sel.kind+" ":"",loc:sel.loc,who,n:list.length})
+    +(bd.editable?"":T(" · 这个阶段不是你的回合"));
   box.innerHTML=list.map((o,i)=>`<button class="chip ${orderChip(o).kind}" data-i="${i}">`
     +`${esc(orderChip(o).label)}</button>`).join("")
-    ||'<span class="hint">这支部队本阶段没有可下的令。</span>';
+    ||`<span class="hint">${T("这支部队本阶段没有可下的令。")}</span>`;
   box.querySelectorAll(".chip").forEach(b=>b.onclick=()=>applyOrder(list[+b.dataset.i]));
   // 小屏上图占满一屏，动作面板在折叠线以下：选中部队若不把它滚进来，用户会以为「点了没反应」。
   // 只在选择变化时滚一次——renderActs 每轮刷新都会跑，每次都滚等于页面自己在抖。
@@ -1286,9 +1744,115 @@ function applyOrder(order){
   const at=lines.findIndex(l=>key(l)===k);
   if(at>=0) lines[at]=order; else lines.push(order);
   ta.value=lines.join("\n")+"\n";
-  toast("已写入 "+order+"（在「军令」页提交）","ok");
-  drawMap(); renderActs();
+  toast(T("已写入 {order}（在「军令」页提交）",{order}),"ok");
+  drawMap(); renderActs(); renderDraft();
 }
+
+// ---------- 军令页：按钮式下令 ----------
+// 一张文本域是**唯一事实**：按钮往它里面写，手打直接改它，草稿行是它的镜像。
+// 两套独立状态就必然会对不上——点了按钮删掉一行、文本框里还留着是最常见的翻车方式。
+let ordSel=null;                       // 当前选中的地点：{loc, kind, power}
+let orderMode=localStorage.getItem("dw.ordermode")||"pad";
+
+const draftLines=()=>$("#ordersText").value.split("\n").map(s=>s.trim()).filter(Boolean);
+
+function unitList(){
+  const out=[];
+  if(!bd||!bd.power) return out;
+  for(const loc of Object.keys(bd.mine||{})){
+    // 建造点上没有部队（`kind` 为 null）：那一格只有 `A PAR B` / `F PAR B`
+    const u=(bd.units||[]).find(x=>x.at===loc&&x.power===bd.power);
+    out.push({loc, at:loc, kind:u?u.kind:null, power:bd.power});
+  }
+  return out;
+}
+
+function renderUnitPick(){
+  const box=$("#unitPick");
+  const list=unitList();
+  if(!list.length){
+    box.innerHTML=`<span class="hint">${bd?T("本阶段没有需要下令的部队。"):""}</span>`;
+    return;
+  }
+  box.innerHTML=list.map(s=>{
+    const on=ordSel&&ordSel.loc===s.loc&&ordSel.kind===s.kind;
+    const label=s.kind?`${s.kind} ${s.loc}`:s.loc;
+    return `<button class="chip${on?" on":""}" data-loc="${s.loc}" data-kind="${s.kind||""}">${label}</button>`;
+  }).join("");
+  box.querySelectorAll(".chip").forEach(b=>b.onclick=()=>{
+    ordSel={loc:b.dataset.loc, at:b.dataset.loc, kind:b.dataset.kind||null, power:bd.power};
+    renderUnitPick(); renderActPick();
+  });
+}
+
+function renderActPick(){
+  const box=$("#actPick");
+  if(!ordSel){ box.innerHTML=`<span class="hint">${T("先点上面一支部队。")}</span>`; return; }
+  const list=ordersOf(ordSel);
+  if(!list.length){ box.innerHTML=`<span class="hint">${T("这支部队本阶段没有可下的令。")}</span>`; return; }
+  // 分组顺序固定：先看「这支部队能开到哪」，再看它能帮谁；驻守/解散/建造收在最后
+  const order=["move","support","convoy","retreat","hold","build","disband","other"];
+  const name={move:"移动",support:"支援",convoy:"护航",retreat:"撤退",
+              hold:"驻守",build:"建造",disband:"解散",other:""};
+  const groups=new Map();
+  for(const o of list){
+    const k=parseOrder(o).kind;
+    if(!groups.has(k)) groups.set(k,[]);
+    groups.get(k).push(o);
+  }
+  box.innerHTML=order.filter(k=>groups.has(k)).map(k=>{
+    const chips=groups.get(k).map(o=>{
+      const p=parseOrder(o);
+      // `title` 给出原始命令串：按钮上是「→ BUR」，实际提交的是「A PAR - BUR」
+      return `<button class="chip ${p.kind}" data-o="${esc(o)}" title="${esc(o)}">${esc(p.label)}</button>`;
+    }).join("");
+    return `<div class="actgrp"><span class="gtag">${T(name[k])}</span>`
+      +`<div class="chiprow">${chips}</div></div>`;
+  }).join("");
+  box.querySelectorAll(".chip").forEach(b=>b.onclick=()=>applyOrder(b.dataset.o));
+}
+
+function renderDraft(){
+  const box=$("#draftList");
+  const lines=draftLines();
+  if(!lines.length){ box.innerHTML=`<span class="hint">${T("（还没写军令）")}</span>`; return; }
+  box.innerHTML=lines.map((l,i)=>
+    `<div class="dl"><code>${esc(l)}</code>`
+    +`<button data-i="${i}" title="${T("删除")}" aria-label="${T("删除")}">✕</button></div>`).join("");
+  box.querySelectorAll("button[data-i]").forEach(b=>b.onclick=()=>{
+    const ls=draftLines(); ls.splice(+b.dataset.i,1);
+    $("#ordersText").value=ls.join("\n");
+    renderDraft();
+  });
+}
+
+function renderOrders(){ renderUnitPick(); renderActPick(); renderDraft(); }
+
+function applyOrderMode(){
+  $("#orderPad").classList.toggle("hidden",orderMode!=="pad");
+  document.querySelectorAll("#orderMode button").forEach(b=>
+    b.classList.toggle("on",b.dataset.mode===orderMode));
+}
+
+// 局面会推进：一支部队上阶段在巴黎、这阶段可能已经被打没了，选择态不能留在幽灵身上
+async function loadOrders(){
+  if(!tokens[seat]){ bd=null; renderOrders(); return; }
+  try{ bd=await api("/api/board"); }
+  catch(e){ bd=null; }
+  if(ordSel&&!unitList().some(s=>s.loc===ordSel.loc&&s.kind===ordSel.kind)) ordSel=null;
+  renderOrders();
+}
+
+$("#orderMode").onclick=e=>{
+  const b=e.target.closest("button[data-mode]");
+  if(!b) return;
+  orderMode=b.dataset.mode;
+  localStorage.setItem("dw.ordermode",orderMode);
+  applyOrderMode();
+};
+$("#ordersText").oninput=renderDraft;
+$("#btnClearDraft").onclick=()=>{ $("#ordersText").value=""; renderDraft(); };
+applyOrderMode();
 
 async function loadMap(){
   if(!tokens[seat]){ bd=null; drawMap(); renderActs(); return; }
@@ -1328,7 +1892,7 @@ $("#mapSvg").onclick=e=>{
     const hits=ordersOf(sel).filter(o=>destOf(o)===loc).sort((a,b)=>rankOrder(a)-rankOrder(b));
     if(hits.length){ applyOrder(hits[0]); return; }
     if(sel.at===loc){ sel=null; drawMap(); renderActs(); return; }
-    toast(`${loc} 不是 ${sel.loc} 这阶段能去的地方`,"err");
+    toast(T("{loc} 不是 {sel} 这阶段能去的地方",{loc,sel:sel.loc}),"err");
   }
 };
 $("#btnMapOrders").onclick=()=>document.querySelector('[data-tab="orders"]').click();
@@ -1379,7 +1943,7 @@ function endDrag(e){
 
 $("#btnZoomIn").onclick=()=>zoomAt(1.4);
 $("#btnZoomOut").onclick=()=>zoomAt(1/1.4);
-$("#btnZoomReset").onclick=()=>{ resetZoom(); toast("已复位到全图"); };
+$("#btnZoomReset").onclick=()=>{ resetZoom(); toast(T("已复位到全图")); };
 
 
 // ---------- 模型页签 ----------
@@ -1393,8 +1957,8 @@ function fillSettings(s,path){
   $("#cfgModel").value=s.model||"";
   $("#cfgKey").value="";
   // 占位符只写「留空不改」，尾四位放在 label 的副标题里——两处都写一遍纯属占地方
-  $("#cfgKey").placeholder=s.has_key?"留空不改":"sk-…（本机网关可留空）";
-  $("#cfgKeyHint").textContent=s.has_key?"已保存 "+s.key_hint+"，留空不改":"留空表示沿用已保存的密钥";
+  $("#cfgKey").placeholder=s.has_key?T("留空不改"):T("sk-…（本机网关可留空）");
+  $("#cfgKeyHint").textContent=s.has_key?T("已保存 {h}，留空不改",{h:s.key_hint}):T("留空表示沿用已保存的密钥");
   $("#cfgPin").value=s.price_in;
   $("#cfgPout").value=s.price_out;
   $("#cfgBudget").value=s.budget_cny;
@@ -1404,7 +1968,7 @@ function fillSettings(s,path){
   $("#cfgHist").value=s.keep_hist;
   $("#cfgMsgs").value=s.keep_msgs;
   const tag=$("#cfgTag");
-  tag.textContent=s.source==="file"?"网页配置":(s.source==="env"?"来自环境变量":"未配置");
+  tag.textContent=s.source==="file"?T("网页配置"):(s.source==="env"?T("来自环境变量"):T("未配置"));
   tag.className="tag"+(s.configured?" live":"");
   if(path) $("#cfgPath").textContent=path;
   // 没配好就自动展开：否则用户对着「未配置」三个字，不知道下一步该点哪
@@ -1439,7 +2003,7 @@ async function loadSettings(){
   try{
     const d=await api("/api/llm/settings");
     fillSettings(d.settings,d.path);
-  }catch(e){ cfgMsg("读取配置失败："+e.message,"bad"); }
+  }catch(e){ cfgMsg(T("读取配置失败：{msg}",{msg:e.message}),"bad"); }
 }
 
 async function saveSettings(){
@@ -1451,59 +2015,59 @@ async function saveSettings(){
 $("#btnCfgSave").onclick=async()=>{
   try{
     const s=await saveSettings();
-    cfgMsg(s.configured?"已保存，立即生效（不用重启）":"已保存，但还缺 Base URL 或模型名",
+    cfgMsg(s.configured?T("已保存，立即生效（不用重启）"):T("已保存，但还缺 Base URL 或模型名"),
            s.configured?"ok":"bad");
-    toast("模型配置已保存","ok");
+    toast(T("模型配置已保存"),"ok");
     await loadLlm();
-  }catch(e){ cfgMsg("保存失败："+e.message,"bad"); }
+  }catch(e){ cfgMsg(T("保存失败：{msg}",{msg:e.message}),"bad"); }
 };
 
 $("#btnCfgTest").onclick=async()=>{
-  cfgMsg("正在真发一次请求…");
+  cfgMsg(T("正在真发一次请求…"));
   try{
     const r=await api("/api/llm/settings/test",{method:"POST",body:JSON.stringify(readSettings())});
     if(r.ok){
       // 离线脚本没有 model 字段，退回 provider 名，别在成功提示里挂一个问号
       const who=r.model||(r.settings&&r.settings.provider)||"?";
-      cfgMsg(`通了 · ${r.ms}ms · ${who} · ${r.tokens} token`
-             +(r.text?` · 回复「${r.text.trim().slice(0,20)}」`:""),"ok");
+      cfgMsg(T("通了 · {ms}ms · {who} · {n} token{tail}",
+                 {ms:r.ms,who,n:r.tokens,tail:r.text?T(" · 回复「{t}」",{t:r.text.trim().slice(0,20)}):""}),"ok");
     }else{
-      cfgMsg("连不上："+r.error,"bad");
+      cfgMsg(T("连不上：{msg}",{msg:r.error}),"bad");
     }
-  }catch(e){ cfgMsg("测试失败："+e.message,"bad"); }
+  }catch(e){ cfgMsg(T("测试失败：{msg}",{msg:e.message}),"bad"); }
 };
 
 $("#btnCfgSaveTest").onclick=async()=>{
   try{ await saveSettings(); }
-  catch(e){ cfgMsg("保存失败："+e.message,"bad"); return; }
+  catch(e){ cfgMsg(T("保存失败：{msg}",{msg:e.message}),"bad"); return; }
   $("#btnCfgTest").click();
   await loadLlm();
 };
 
 function renderLlm(d){
   const seats=d.seats||{}; llmSeats=seats;
-  const from=d.source==="file"?"网页配置":(d.source==="env"?"环境变量":"未配置");
+  const from=d.source==="file"?T("网页配置"):(d.source==="env"?T("来自环境变量"):T("未配置"));
   $("#llmHead").innerHTML = d.configured
-    ? `模型 <b>${esc(d.provider)}</b> ｜ 来源 ${from}`
-      + ` ｜ 单座位 ¥${d.budget_cny}${d.total_budget_cny>0?` · 全场 ¥${d.total_budget_cny}`:" · 全场不限"}`
-      + ` ｜ 已用 ¥${d.total.cost_cny} · ${d.total.tokens} token`
-      + ` ｜ 上下文窗口 ${d.context.keep_history} 段结算 / ${d.context.keep_messages} 条消息`
-    : "还没有配置模型：展开下面的「接入设置」填 Base URL 与模型名，存一次即生效；"
-      + "只想离线演练就把接入方式改成「离线脚本」。";
-  $("#llmSeats").innerHTML=POWERS.map(([c,n,k])=>{
+    ? T("模型 {p} ｜ 来源 {s}",{p:`<b>${esc(d.provider)}</b>`,s:from})
+      + T(" ｜ 单座位 ¥{a}",{a:d.budget_cny})
+      + (d.total_budget_cny>0?T(" · 全场 ¥{b}",{b:d.total_budget_cny}):T(" · 全场不限"))
+      + T(" ｜ 已用 ¥{c} · {t} token",{c:d.total.cost_cny,t:d.total.tokens})
+      + T(" ｜ 上下文窗口 {h} 段结算 / {m} 条消息",{h:d.context.keep_history,m:d.context.keep_messages})
+    : T("还没有配置模型：展开下面的「接入设置」填 Base URL 与模型名，存一次即生效；只想离线演练就把接入方式改成「离线脚本」。");
+  $("#llmSeats").innerHTML=POWERS.map(([c,,,k])=>{
     const s=seats[c], u=(s&&s.usage)||{};
     const right=s
-      ? (s.busy?"思考中 · ":"")
-        + `${u.calls||0} 次 · ${s.tokens||0} tok · ¥${(u.cost_cny||0).toFixed(3)}`
-        + (u.fallbacks?` · 降级 ${u.fallbacks}`:"")
-        + (u.truncated?` · 截断 ${u.truncated}`:"")
-        + (s.enabled?"":` · ${esc(s.stop_reason||"已停用")}`)
+      ? (s.busy?T("思考中 · "):"")
+        + T("{n} 次",{n:u.calls||0})+` · ${s.tokens||0} tok · ¥${(u.cost_cny||0).toFixed(3)}`
+        + (u.fallbacks?T(" · 降级 {n}",{n:u.fallbacks}):"")
+        + (u.truncated?T(" · 截断 {n}",{n:u.truncated}):"")
+        + (s.enabled?"":` · ${esc(s.stop_reason||T("已停用"))}`)
         + (s.last_error?`<i class="llmerr" title="${esc(s.last_error)}">⚠</i>`:"")
-      : "人类操作";
+      : T("人类操作");
     return `<div class="seat" data-p="${c}">
       <input type="checkbox" data-p="${c}" ${s&&s.enabled?"checked":""}>
       <span class="dot" style="background:var(--${k})"></span>
-      <span class="nm">${n}</span>
+      <span class="nm">${NAME[c]}</span>
       <span class="cnt">${right}</span>
     </div>`;
   }).join("");
@@ -1513,7 +2077,7 @@ function renderLlm(d){
       const p=box.dataset.p;
       try{
         await api("/api/llm/seat",{method:"POST",body:JSON.stringify({power:p,enabled:box.checked})});
-        toast(box.checked?(NAME[p]+" 已交给模型"):(NAME[p]+" 已暂停，账还留着"),"ok");
+        toast(box.checked?T("{p} 已交给模型",{p:NAME[p]}):T("{p} 已暂停，账还留着",{p:NAME[p]}),"ok");
         await loadLlm(); await refresh();
       }catch(e){ box.checked=!box.checked; toast(e.message,"err"); }
     };
@@ -1522,7 +2086,7 @@ function renderLlm(d){
 
 async function loadLlm(){
   try{ renderLlm(await api("/api/llm")); }
-  catch(e){ $("#llmHead").textContent="读取失败："+e.message; }
+  catch(e){ $("#llmHead").textContent=T("读取失败：{msg}",{msg:e.message}); }
   // 配置表单单独取（要管理员）：拿不到时只影响表单，不影响上面的座位列表
   await loadSettings();
 }
@@ -1532,8 +2096,8 @@ $("#btnTick").onclick=async()=>{
     const d=await api("/api/llm/tick",{method:"POST"});
     const acted=(d.results||[]).filter(r=>!r.skipped);
     toast(acted.length
-      ? acted.map(r=>NAME[r.power]+"："+(r.ok?"已行动":"失败")).join("\n")
-      : "本阶段没有待行动的模型座位（后台会自动推进）","ok");
+      ? acted.map(r=>NAME[r.power]+"："+(r.ok?T("已行动"):T("失败"))).join("\n")
+      : T("本阶段没有待行动的模型座位（后台会自动推进）"),"ok");
     await loadLlm(); await refresh();
   }catch(e){ toast(e.message,"err"); }
 };
@@ -1542,27 +2106,28 @@ $("#btnCtx").onclick=async()=>{
   try{
     const d=await api("/api/llm/context?power="+encodeURIComponent(seat));
     $("#ctxOut").classList.remove("hidden");
-    $("#ctxOut").textContent=`${NAME[seat]} 的上下文：${d.stats.chars} 字 ≈ ${d.stats.tokens} token`
-      + `（保留 ${d.stats.kept_history} 段结算 / ${d.stats.kept_messages} 条消息`
-      + (d.stats.kept_own?` / 自己发出 ${d.stats.kept_own} 封`:"")
+    $("#ctxOut").textContent=T("{p} 的上下文：{c} 字 ≈ {t} token（保留 {h} 段结算 / {m} 条消息{own}，略去 {dh} 段历史 / {dm} 条消息）\n",
+        {p:NAME[seat],c:d.stats.chars,t:d.stats.tokens,h:d.stats.kept_history,m:d.stats.kept_messages,
+         own:d.stats.kept_own?T(" / 自己发出 {n} 封",{n:d.stats.kept_own}):"",
+         dh:d.dropped_history,dm:d.dropped_messages})
       + `，略去 ${d.dropped_history} 段历史 / ${d.dropped_messages} 条消息）\n`
       + "─".repeat(40)+"\n"+[d.digest,d.own,d.note,d.text].filter(Boolean).join("\n");
   }catch(e){ toast(e.message,"err"); }
 };
 
-$("#btnRefresh").onclick=()=>{refresh();toast("已刷新");};
+$("#btnRefresh").onclick=()=>{refresh();toast(T("已刷新"));};
 
 // ---------- 管理页签：分发座位 / 暂停 / 强制结算 ----------
 function renderSeatLinks(links){
-  $("#linksOut").innerHTML=POWERS.filter(([c])=>links[c]).map(([c,n])=>
-    `<div class="linkrow"><span class="nm">${n}</span>`
+  $("#linksOut").innerHTML=POWERS.filter(([c])=>links[c]).map(([c])=>
+    `<div class="linkrow"><span class="nm">${NAME[c]}</span>`
     + `<code>${esc(links[c])}</code>`
-    + `<button data-power="${c}">复制</button></div>`).join("");
+    + `<button data-power="${c}">${T("复制")}</button></div>`).join("");
   $("#linksOut").querySelectorAll("button[data-power]").forEach(b=>{
     b.onclick=async()=>{
       const url=links[b.dataset.power];
-      try{ await navigator.clipboard.writeText(url); toast(NAME[b.dataset.power]+" 的链接已复制","ok"); }
-      catch(e){ toast("浏览器不允许写剪贴板，请手动选中复制","err"); }
+      try{ await navigator.clipboard.writeText(url); toast(T("{p} 的链接已复制",{p:NAME[b.dataset.power]}),"ok"); }
+      catch(e){ toast(T("浏览器不允许写剪贴板，请手动选中复制"),"err"); }
     };
   });
 }
@@ -1591,7 +2156,7 @@ $("#btnRotate").onclick=async()=>{
     if(!tokens[seat]&&d.rotated.length) seat=d.rotated[0];
     save();
     renderSeatLinks(d.links);
-    toast(`已换 ${d.rotated.length} 把，旧链接立即失效`,"ok");
+    toast(T("已换 {n} 把，旧链接立即失效",{n:d.rotated.length}),"ok");
     refresh();
   }catch(e){ toast(e.message,"err"); }
 };
@@ -1600,11 +2165,11 @@ $("#btnRotate").onclick=async()=>{
 $("#btnWatchLink").onclick=async()=>{
   try{
     const d=await api("/api/spectate/key");
-    $("#watchLinkOut").innerHTML=`<div class="linkrow"><span class="nm">观战</span>`
-      +`<code>${esc(d.link)}</code><button id="copyWatch">复制</button></div>`;
+    $("#watchLinkOut").innerHTML=`<div class="linkrow"><span class="nm">${T("观战")}</span>`
+      +`<code>${esc(d.link)}</code><button id="copyWatch">${T("复制")}</button></div>`;
     $("#copyWatch").onclick=async()=>{
-      try{ await navigator.clipboard.writeText(d.link); toast("观战链接已复制","ok"); }
-      catch(e){ toast("浏览器不允许写剪贴板，请手动选中复制","err"); }
+      try{ await navigator.clipboard.writeText(d.link); toast(T("观战链接已复制"),"ok"); }
+      catch(e){ toast(T("浏览器不允许写剪贴板，请手动选中复制"),"err"); }
     };
   }catch(e){ toast(e.message,"err"); }
 };
@@ -1615,7 +2180,7 @@ $("#btnWatchRotate").onclick=async()=>{
   try{
     await api("/api/spectate/rotate",{method:"POST"});
     $("#watchLinkOut").innerHTML="";
-    toast("观战码已更换，旧链接已失效","ok");
+    toast(T("观战码已更换，旧链接已失效"),"ok");
   }catch(e){ toast(e.message,"err"); }
 };
 
@@ -1623,7 +2188,7 @@ $("#btnPause").onclick=async()=>{
   const action=lastState&&lastState.paused?"resume":"pause";
   try{
     await api("/api/admin/control",{method:"POST",body:JSON.stringify({action})});
-    toast(action==="pause"?"已暂停：阶段时钟停走，交令也暂停结算":"已继续","ok");
+    toast(action==="pause"?T("已暂停：阶段时钟停走，交令也暂停结算"):T("已继续"),"ok");
     await refresh();
   }catch(e){ toast(e.message,"err"); }
 };
@@ -1632,7 +2197,7 @@ $("#btnForce").onclick=async()=>{
   if(!confirm("把还没交令的国家按驻守处理，并立即推进到下一阶段？")) return;
   try{
     const d=await api("/api/admin/settle",{method:"POST"});
-    toast(d.settled?"已强制结算，进入下一阶段":"没能推进（可能对局已结束或处于暂停）",d.settled?"ok":"err");
+    toast(d.settled?T("已强制结算，进入下一阶段"):T("没能推进（可能对局已结束或处于暂停）"),d.settled?"ok":"err");
     await refresh(); if(!bound) await loadLlm();
   }catch(e){ toast(e.message,"err"); }
 };
@@ -1641,7 +2206,7 @@ $("#btnNew").onclick=async()=>{
   if(!confirm("清空当前对局并开新局？旧存档会在服务器上备份一份。")) return;
   try{
     const d=await api("/api/reset",{method:"POST",body:JSON.stringify({confirm:true})});
-    tokens=d.tokens; save(); toast("新局已开始","ok"); await refresh();
+    tokens=d.tokens; save(); toast(T("新局已开始"),"ok"); await refresh();
   }catch(e){ toast(e.message,"err"); }
 };
 
@@ -1652,8 +2217,8 @@ function paintTheme(t){
   document.documentElement.dataset.theme=t;
   const b=$("#btnTheme");
   if(b){
-    b.textContent=t==="light"?"☾ 夜间":"☀ 日间";
-    b.title=t==="light"?"现在是日间模式，点一下切到夜间":"现在是夜间模式，点一下切到日间";
+    b.textContent=t==="light"?T("☾ 夜间"):T("☀ 日间");
+    b.title=t==="light"?T("现在是日间模式，点一下切到夜间"):T("现在是夜间模式，点一下切到日间");
   }
   // 地图填色是 SVG 内联属性（不是 CSS），换了底色必须重画一遍
   mapPalette=null;
