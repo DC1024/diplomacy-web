@@ -22,6 +22,10 @@ log = logging.getLogger("diplomacy.llm")
 
 _JSON = re.compile(r"\{.*\}", re.S)
 
+# 思维链跑飞的唯一廉价解药：明说「别想」。实测时它把 193 token 的答案救回来过一次，
+# 但同一措辞随后连试 4 次全部照样跑飞——只能当兜底，不能当依赖。
+_NUDGE = "\n\n（不要再推理，直接给出 JSON 答案。）"
+
 
 def parse_action(text: str) -> dict | None:
     """从模型输出里抠出那个 JSON 对象。允许前后有废话或 ```json 包裹。"""
@@ -53,6 +57,7 @@ class Usage:
     passes: int = 0     # 模型主动选择驻守，属于正常决策
     fallbacks: int = 0  # 输出不可用/报错后的兜底，属于故障
     errors: int = 0
+    truncated: int = 0  # 撞 max_tokens 的次数：这些调用白花钱，值得单独看
 
     @property
     def tokens(self) -> int:
@@ -74,16 +79,47 @@ class LLMSeat:
         self.usage = Usage()
         self.enabled = True
         self.busy = False  # 正在跟模型说话：阶段时钟看到它会先让一轮，别抢
+        # 「暂停」与「停摆」是两件事，页面上的勾选框只表达前者：
+        #   paused=True    用户主动收手，可能有人接手，所以后台**不**替它驻守
+        #   autohold=True  钱烧完了/全场预算到顶，没人接手，必须由后台替它驻守，
+        #                  否则这一国永远不交令，全桌冻死
+        self.paused = False
+        self.autohold = False
         self.stop_reason = ""
         self.last_error = ""  # 最近一次故障原因，成功一次就清掉；页面上挂个 ⚠ 提示
 
     # ---------- 对外 ----------
     def status(self) -> dict:
         return dict(power=self.power, provider=getattr(self.provider, "name", "?"),
-                    enabled=self.enabled, busy=self.busy, stop_reason=self.stop_reason,
+                    enabled=self.enabled, paused=self.paused, autohold=self.autohold,
+                    busy=self.busy, stop_reason=self.stop_reason,
                     last_error=self.last_error, budget_cny=self.budget_cny,
                     persona=self.persona,
                     usage=asdict(self.usage), tokens=self.usage.tokens)
+
+    def pause(self, why: str = "已暂停") -> None:
+        """用户收手：不再叫模型，但**座位与账都留着**。
+
+        原先「收回」是 `_seats.pop()`，对象连同 `usage` 一起消失——想先别花钱又想知道
+        已经花了多少，做不到。现在停的是开关，不是账本。
+        """
+        self.enabled = False
+        self.paused = True
+        self.autohold = False
+        self.stop_reason = why
+
+    def resume(self) -> None:
+        self.enabled = True
+        self.paused = False
+        self.autohold = False
+        self.stop_reason = ""
+
+    def halt(self, why: str) -> None:
+        """钱烧完了：停掉模型，但让后台替它驻守，别把全桌拖住。"""
+        self.enabled = False
+        self.paused = False
+        self.autohold = True
+        self.stop_reason = why
 
     def act(self, arena) -> dict:
         """让这个座位走一步。返回一份可直接塞进 API 响应的诊断信息。
@@ -151,37 +187,44 @@ class LLMSeat:
         被截断的那次调用同样是真金白银。以前失败路径直接往上抛，账面只算成功的两次，
         成本实测会低报一半——而那正是衡量「一局多少钱」的唯一数字，低报等于白测。
 
-        截断有**两种**，处置完全不同，所以这里是一条梯子而不是一次重试：
+        撞墙分**两种**，处置完全不同，所以这里是一条梯子而不是一次重试：
 
-        - 配额不够用（思维链 2200–3900 浮动，偶尔超一点）——把 `max_tokens` 放宽一倍就够。
-        - 思维链跑飞（实测有座位把 6000 token 全用来想、一个字正文都没写）——再放宽
-          也只是把「想不完」的额度翻倍，纯属烧钱。这时改试**劝它别想**：一次探针里
-          加上「直接给出 JSON 答案」后思维链归零、193 token 出完整答案；但同一措辞
-          随后连试 4 次全部照样跑飞，所以这一级只是兜底，不能当依赖。
+        - **一个字都没写**（`reply.text` 为空）= 它还在想，思维链把配额吃干了。这时候
+          翻倍等于给「想不完」加钱：实测有座位 4096 → 8192 连着两次空正文，第三次
+          劝它「不要再推理」才用 193 token 交出完整答案。所以这一支**先劝、不翻倍**，
+          配额顺势收到 2000。
+        - **写了一半被截断**（有正文、不是完整 JSON）= 真的差地方，放宽一倍就够。
 
-        两级都走完还不行，才认栽降级驻守。失败的每一次都进账，页面上看得见。
+        劝也不是万灵药：同一措辞探针里 1 次管用、随后 4 次照样跑飞，所以它只是
+        「最便宜的那一手」，后面还留着放宽到 16384 这一级。三级都走完才认栽降级驻守，
+        每一次尝试都进账，页面上看得见。
         """
-        cap = None
+        cap = None            # None = 用 provider 的默认配额
         nudge = ""
-        for attempt in range(3):
+        widened = False
+        for _ in range(3):
             try:
                 reply = self.provider.chat(system, user + nudge, max_tokens=cap)
             except BadOutput as exc:
                 self._bill(exc.reply)
                 if exc.kind != "truncated":
                     raise
-                if attempt == 0 and exc.cap:
-                    cap = min(exc.cap * 2, 16384)
+                self.usage.truncated += 1
+                if not exc.reply.text.strip() and not nudge:
+                    cap = min(max(exc.cap, 1000), 2000)
+                    nudge = _NUDGE
+                    log.info("%s 一个字都没写（%s token 全在思维链上），改为劝它直接作答",
+                             self.power, exc.cap)
+                    continue
+                if not widened and exc.cap:
+                    widened = True
+                    target = exc.cap * 2
+                    if nudge:
+                        # 劝过还撞墙，别从 2000 翻到 4000 再撞一次，直接给足一档
+                        target = max(target, 8192)
+                    cap = min(target, 16384)
                     log.info("%s 输出被截断（max_tokens=%s），放宽到 %s 重试",
                              self.power, exc.cap, cap)
-                    continue
-                if not nudge:
-                    # 加到 8192 都填不满，说明不是「地方不够」而是「一直想」。
-                    # 这时候缩回一个小额度反而更稳：劝住了不用这么大，劝不住也不至于烧穿。
-                    cap = min(max(exc.cap, 1000), 2000)
-                    nudge = "\n\n（不要再推理，直接给出 JSON 答案。）"
-                    log.info("%s 的思维链吃光了 %s token，改为劝它直接作答",
-                             self.power, exc.cap)
                     continue
                 raise
             self._bill(reply)
@@ -195,8 +238,7 @@ class LLMSeat:
         self.usage.cost_cny += (reply.prompt_tokens * self.price_in
                                 + reply.completion_tokens * self.price_out) / 1_000_000
         if self.usage.cost_cny > self.budget_cny:
-            self.enabled = False
-            self.stop_reason = f"超出预算 ¥{self.budget_cny:.2f}"
+            self.halt(f"超出预算 ¥{self.budget_cny:.2f}")
             log.warning("%s 超出预算，转由保底命令接管", self.power)
 
     def _apply_says(self, arena, says: list) -> list[dict]:

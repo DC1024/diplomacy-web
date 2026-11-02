@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from .clock import PhaseClock
 from .engine.arena import POWERS, Arena, OrderError
-from .llm import LLMSeat, SeatRunner, Usage, probe
+from .llm import LLMSeat, SeatRunner, Usage, probe, seatstore
 from .llm import build as build_context
 from .llm import settings as llm_settings
 from .llm.orders import hold_orders
@@ -61,7 +61,12 @@ _arena: Arena | None = None
 
 # ---- LLM 座位（B1）----
 _seats: dict[str, LLMSeat] = {}
-_runner = SeatRunner(lambda: _arena, _seats, interval=float(os.environ.get("LLM_INTERVAL", "2")))
+_runner = SeatRunner(
+    lambda: _arena, _seats,
+    interval=float(os.environ.get("LLM_INTERVAL", "2")),
+    total_budget=lambda: llm_settings.current().total_budget_cny,
+    persist=lambda: seatstore.save(_seats),
+)
 
 # 阶段时钟：0 = 关闭。多人对局建议 300～900 秒；热座一个人操作七国时开着只会添乱。
 PHASE_SECONDS = float(os.environ.get("PHASE_SECONDS", "0"))
@@ -192,6 +197,10 @@ async def lifespan(_app: FastAPI):
     从来没跑起来过**。测试全绿是因为它们自己手动调 `/api/llm/tick`，绕开了后台线程。
     """
     warn_if_unprotected()
+    # 座位表落过盘就装回来：重启后勾选与花费都还在（原先 `_seats` 只在内存里，
+    # 重启等于把「谁在打」和「这局花了多少」一起清空，成本护栏也跟着重置）。
+    if not _seats:
+        seatstore.restore(_seats, llm_settings.current())
     _runner.start()
     _clock.start()
     try:
@@ -287,11 +296,15 @@ def reset(req: ResetReq, x_admin_key: Annotated[str | None, Header()] = None) ->
         _arena = Arena.create(STATE_PATH)
         _runner.reset()
         _clock.reset()
-        # 新局重置预算与用量，但保留哪些座位由模型操作
+        # 新局重置花费与停摆，但**保留用户按下的暂停**：那是「这一国暂时不给模型」的
+        # 意图，不该被新开一局悄悄改掉
         for llm_seat in _seats.values():
             llm_seat.usage = Usage()
-            llm_seat.enabled = True
-            llm_seat.stop_reason = ""
+            if llm_seat.paused:
+                llm_seat.pause("已暂停")
+            else:
+                llm_seat.resume()
+        seatstore.save(_seats)
         return dict(match_id=_arena.data["match_id"], tokens=_arena.data["tokens"])
 
 
@@ -534,6 +547,7 @@ def draw(req: DrawReq, x_seat_token: Annotated[str | None, Header()] = None) -> 
 class SeatReq(BaseModel):
     power: str
     enabled: bool = True
+    remove: bool = Field(False, description="真的要删掉这个座位（连账一起），而不是暂停")
     persona: str = Field("", description="给这个座位的人设，影响说话风格")
     budget_cny: float | None = Field(None, description="本局预算，超出后自动转保底驻守")
 
@@ -551,6 +565,8 @@ class SettingsReq(BaseModel):
     price_in: float | None = Field(None, ge=0, description="¥ / 百万 input token")
     price_out: float | None = Field(None, ge=0, description="¥ / 百万 output token")
     budget_cny: float | None = Field(None, gt=0, description="单座位预算，超出自动转保底驻守")
+    total_budget_cny: float | None = Field(None, ge=0,
+                                           description="全场总预算，0 = 不限；撞线后全员转驻守")
     keep_hist: int | None = Field(None, ge=0, le=50, description="上下文：最近几段结算")
     keep_msgs: int | None = Field(None, ge=0, le=500, description="上下文：最近几条消息")
 
@@ -600,6 +616,7 @@ def llm_status() -> dict:
         source=cfg.source,
         model=cfg.model,
         budget_cny=cfg.budget_cny,
+        total_budget_cny=cfg.total_budget_cny,
         price=dict(input=cfg.price_in, output=cfg.price_out),
         context=dict(keep_history=cfg.keep_hist, keep_messages=cfg.keep_msgs),
         seats={p: s.status() for p, s in _seats.items()},
@@ -634,6 +651,7 @@ def llm_put_settings(req: SettingsReq, x_admin_key: Annotated[str | None, Header
     cfg = llm_settings.update(req.patch())
     for llm_seat in _seats.values():
         cfg.apply_to(llm_seat)
+    seatstore.save(_seats)
     log.info("模型配置已由管理员更新（来源 %s，模式 %s）", cfg.source, cfg.mode)
     return dict(settings=cfg.public(), seats={p: s.status() for p, s in _seats.items()})
 
@@ -663,15 +681,41 @@ def llm_test_settings(req: SettingsReq | None = None,
 
 @app.post("/api/llm/seat")
 def llm_seat(req: SeatReq, x_admin_key: Annotated[str | None, Header()] = None) -> dict:
-    """把某个国家交给模型，或收回人类操作。"""
+    """把某个国家交给模型 / 让模型暂停 / 彻底移除这个座位。
+
+    这里特意把「暂停」和「收回」分成两个动作：
+
+    - 暂停（`enabled:false`）：座位和账都留着，人可能在旁边接手。原先的做法是
+      `_seats.pop()`，对象连同 `usage` 一起消失——「先别花钱，但我要看账」做不到，
+      P1 实测时为了叫停一次失控的花费只能连账一起丢。
+    - 移除（`remove:true`）：真的要清掉这个座位（连同账），下一局重新开始。
+    """
     require_admin(x_admin_key)
     power = req.power.upper()
     if power not in POWERS:
         raise HTTPException(400, f"未知国家：{req.power}")
 
-    if not req.enabled:
+    def snapshot(**extra) -> dict:
+        return dict(power=power, seats={p: s.status() for p, s in _seats.items()}, **extra)
+
+    existing = _seats.get(power)
+    if req.remove:
         _seats.pop(power, None)
-        return dict(power=power, enabled=False, seats={p: s.status() for p, s in _seats.items()})
+        seatstore.save(_seats)
+        return snapshot(enabled=False, removed=True)
+
+    if not req.enabled:
+        if existing is None:
+            return snapshot(enabled=False)
+        existing.pause("已暂停（用量保留）")
+        seatstore.save(_seats)
+        return snapshot(enabled=False, paused=True, seat=existing.status())
+
+    if existing is not None:
+        existing.resume()
+        llm_settings.current().apply_to(existing)   # 顺手把最新配置推上去
+        seatstore.save(_seats)
+        return snapshot(enabled=True, resumed=True, seat=existing.status())
 
     cfg = llm_settings.current()
     seat = LLMSeat(power, provider_or_400(), persona=req.persona,
@@ -679,7 +723,8 @@ def llm_seat(req: SeatReq, x_admin_key: Annotated[str | None, Header()] = None) 
                    price_in=cfg.price_in, price_out=cfg.price_out,
                    keep_hist=cfg.keep_hist, keep_msgs=cfg.keep_msgs)
     _seats[power] = seat
-    return dict(power=power, enabled=True, seat=seat.status())
+    seatstore.save(_seats)
+    return snapshot(enabled=True, seat=seat.status())
 
 
 @app.post("/api/llm/tick")

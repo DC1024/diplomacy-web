@@ -122,6 +122,14 @@ def test_missing_fields_are_not_overwritten(srv):
     assert (s["base_url"], s["model"], s["budget_cny"]) == ("https://api.x.com/v1", "keep-me", 9.0)
 
 
+def test_total_budget_is_a_knob_and_zero_means_unlimited(srv):
+    """全场总闸：0 = 不限，负数没有意义（等于「还没开局就已经超了」）。"""
+    client, _, _ = srv
+    assert put(client, total_budget_cny=0).json()["settings"]["total_budget_cny"] == 0
+    assert put(client, total_budget_cny=35).json()["settings"]["total_budget_cny"] == 35.0
+    assert put(client, total_budget_cny=-1).status_code == 422
+
+
 def test_only_admin_can_read_or_write(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ADMIN_KEY", "k")

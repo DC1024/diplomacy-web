@@ -63,6 +63,7 @@ class Settings:
     price_in: float = 2.0         # ¥ / 百万 input token
     price_out: float = 8.0        # ¥ / 百万 output token
     budget_cny: float = 20.0      # 单座位预算，超出后自动转保底驻守
+    total_budget_cny: float = 60.0  # 全场总闸，0 = 不限；撞线后全员转驻守（不冻桌）
     keep_hist: int = 3            # 上下文：最近几段结算
     keep_msgs: int = 30           # 上下文：最近几条消息
     source: str = "none"          # none | env | file —— 只用于页面提示，不落盘
@@ -118,6 +119,7 @@ class Settings:
             price_in=_env_float("LLM_PRICE_IN", 2.0),
             price_out=_env_float("LLM_PRICE_OUT", 8.0),
             budget_cny=_env_float("LLM_BUDGET_CNY", 20.0),
+            total_budget_cny=_env_float("LLM_TOTAL_BUDGET_CNY", 60.0),
             keep_hist=_env_int("LLM_KEEP_HIST", 3),
             keep_msgs=_env_int("LLM_KEEP_MSGS", 30),
             source="env" if (base or model or key or mode == "scripted") else "none",
@@ -178,8 +180,11 @@ class Settings:
         """把新配置推到已经在跑的座位上。
 
         不这么做的话，「改完预算」这个动作要等下一局才生效——用户会以为没保存。
-        预算上调后要**把停掉的座位放回来**：`_bill()` 超额就 `enabled=False`，
+        预算上调后要**把停掉的座位放回来**：`_bill()` 超额就 `halt()`，
         此时若只改数字不带回收，页面会一直显示「超出预算 ¥20」而预算已经改成 ¥50。
+
+        只放回**因为钱**停掉的（`autohold`）。用户自己按的暂停不能因为改了个预算就
+        偷偷开跑——那是最容易被当成「它自己又开始花钱了」的行为。
         """
         provider = self.build_provider()
         if provider is not None:
@@ -187,9 +192,8 @@ class Settings:
         seat.price_in, seat.price_out = self.price_in, self.price_out
         seat.budget_cny = self.budget_cny
         seat.keep_hist, seat.keep_msgs = self.keep_hist, self.keep_msgs
-        if not seat.enabled and seat.usage.cost_cny <= self.budget_cny:
-            seat.enabled = True
-            seat.stop_reason = ""
+        if seat.autohold and seat.usage.cost_cny <= self.budget_cny:
+            seat.resume()
 
 
 def mask_key(key: str) -> str:

@@ -109,9 +109,10 @@ def test_plain_empty_body_is_not_treated_as_truncation(monkeypatch):
     assert box.value.kind == "empty"
 
 
-def test_seat_widens_the_cap_once_on_truncation(monkeypatch):
+def test_partial_json_widens_the_cap_once(monkeypatch):
+    """写了一半被截断 = 真的差地方，放宽一倍就够（这与「一个字都没写」不同）。"""
     seen = fake_gateway(monkeypatch, [
-        reply_body("", finish="length", reasoning=1900),
+        reply_body('{"pass": tr', finish="length", reasoning=1900),
         reply_body('{"pass": true}', reasoning=900),
     ])
     seat = LLMSeat("GERMANY", provider(max_tokens=3000), budget_cny=20.0)
@@ -119,28 +120,44 @@ def test_seat_widens_the_cap_once_on_truncation(monkeypatch):
     assert caps(seen) == [3000, 6000]    # 第一次撞墙，第二次翻倍
     assert json.loads(reply.text) == {"pass": True}
     assert seat.usage.calls == 2         # 两次都记了账
+    assert seat.usage.truncated == 1
     assert seat.usage.cost_cny > 0
 
 
-def test_runaway_chain_of_thought_gets_told_to_stop_thinking(monkeypatch):
-    """配额翻倍救不了「一直想」：实测有座位把 6000 token 全用来想、正文一个字没有。
+def test_empty_body_gets_talked_out_of_thinking_instead_of_widened(monkeypatch):
+    """一个字都没写 = 它还在想，这时候翻倍等于给「想不完」加钱（缺口 16）。
 
-    这时第三次该带着「别再推理」把人拽回来——实测同一提示词下思维链归零、
-    193 token 交出完整答案，比继续加额度便宜二十倍。
+    实测那一轮 4096 → 8192 连着两次空正文，第三次劝它「不要再推理」才用 193
+    token 交出完整答案；而白烧的那两次，各花了四千多 token 的钱。
     """
     seen = fake_gateway(monkeypatch, [
         reply_body("", finish="length", reasoning=4096),
-        reply_body("", finish="length", reasoning=8192),
         reply_body('{"pass": true}', reasoning=0, completion=193),
     ])
     seat = LLMSeat("AUSTRIA", provider(), budget_cny=20.0)
     reply = seat._chat("s", "u")
-    # 放宽（4096→8192）→ 放宽到头（8192 是这一级的天花板）→ 反而缩回 2000 劝它别想
-    assert caps(seen) == [4096, 8192, 2000]
+    assert caps(seen) == [4096, 2000]        # 不翻倍，直接缩回劝它的额度
     assert "不要再推理" in last_user(seen)
-    assert all("不要再推理" not in p["messages"][-1]["content"] for p in seen[:2])  # 前两次不加
+    assert "不要再推理" not in seen[0]["messages"][-1]["content"]   # 第一次不加
     assert json.loads(reply.text) == {"pass": True}
+    assert seat.usage.calls == 2
+
+
+def test_runaway_chain_of_thought_escalates_then_gives_up(monkeypatch):
+    """劝不住就放宽到 8192 再给一次机会，还不行才认栽——每一步都计费。"""
+    seen = fake_gateway(monkeypatch, [
+        reply_body("", finish="length", reasoning=4096),
+        reply_body("", finish="length", reasoning=2000),
+        reply_body("", finish="length", reasoning=8192),
+    ])
+    seat = LLMSeat("AUSTRIA", provider(), budget_cny=20.0)
+    with pytest.raises(ProviderError):
+        seat._chat("s", "u")
+    # 劝（2000）→ 劝不住才放宽（8192）；全程没有「先翻倍到 8192 再劝」那一笔
+    assert caps(seen) == [4096, 2000, 8192]
+    assert "不要再推理" in last_user(seen)
     assert seat.usage.calls == 3
+    assert seat.usage.truncated == 3
 
 
 def test_truncation_costs_money_even_when_it_gives_up(monkeypatch):

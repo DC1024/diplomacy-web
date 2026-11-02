@@ -310,6 +310,8 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
           <div class="row">
             <div><label>单座位预算<span class="sub">¥，超出自动驻守</span></label>
               <input id="cfgBudget" type="number" step="1" min="1"></div>
+            <div><label>全场预算<span class="sub">¥，0 = 不限</span></label>
+              <input id="cfgTotal" type="number" step="5" min="0"></div>
             <div><label>输出上限<span class="sub">token，含思维链</span></label>
               <input id="cfgMaxTok" type="number" step="256" min="256" max="32000"></div>
             <div><label>超时<span class="sub">秒</span></label>
@@ -330,8 +332,11 @@ select{background:var(--panel2);color:var(--text);border:1px solid var(--line);b
           <div class="hint">「测试连接」会真发一次很小请求，把「地址写错 / 模型名不对 / 密钥无效」
             这三种分开——它们在页面上本来都只表现为「没反应」。测试不会覆盖已保存的配置。<br>
             「输出上限」是<b>含思维链</b>的总配额：推理型模型会先花一两千 token 想，配额给小了
-            正文回来就是空的（页面只会说「未给出可解析的 JSON」）。撞墙时后台会先放宽一倍，
-            还不行就劝它「不要推理、直接作答」——两级都不成才降级驻守，每次尝试都计费。<br>
+            正文回来就是空的（页面只会说「未给出可解析的 JSON」）。撞墙时按正文分岔：
+            <b>一个字都没写</b>说明它还在想，先劝它「不要推理、直接作答」；<b>写了一半</b>才放宽配额。
+            都不成才降级驻守，每次尝试都计费。<br>
+            预算有两道：<b>单座位</b>管每家，<b>全场</b>管一局总账（撞线后所有座位转驻守，
+            局面继续走、只是不再花钱）。<br>
             存在 <code id="cfgPath">data/llm.json</code>，里面有密钥，别把它提交进仓库。</div>
         </div>
       </details>
@@ -959,6 +964,7 @@ function fillSettings(s,path){
   $("#cfgPin").value=s.price_in;
   $("#cfgPout").value=s.price_out;
   $("#cfgBudget").value=s.budget_cny;
+  $("#cfgTotal").value=s.total_budget_cny;
   $("#cfgMaxTok").value=s.max_tokens;
   $("#cfgTimeout").value=s.timeout;
   $("#cfgHist").value=s.keep_hist;
@@ -979,7 +985,8 @@ function readSettings(){
   const key=$("#cfgKey").value.trim();
   if(key) body.api_key=key;
   for(const [k,sel] of [["price_in","#cfgPin"],["price_out","#cfgPout"],
-                        ["budget_cny","#cfgBudget"],["timeout","#cfgTimeout"]]){
+                        ["budget_cny","#cfgBudget"],["total_budget_cny","#cfgTotal"],
+                        ["timeout","#cfgTimeout"]]){
     const v=parseFloat($(sel).value); if(!isNaN(v)) body[k]=v;
   }
   for(const [k,sel] of [["keep_hist","#cfgHist"],["keep_msgs","#cfgMsgs"],
@@ -1043,7 +1050,8 @@ function renderLlm(d){
   const seats=d.seats||{}; llmSeats=seats;
   const from=d.source==="file"?"网页配置":(d.source==="env"?"环境变量":"未配置");
   $("#llmHead").innerHTML = d.configured
-    ? `模型 <b>${esc(d.provider)}</b> ｜ 来源 ${from} ｜ 预算 ¥${d.budget_cny}/局`
+    ? `模型 <b>${esc(d.provider)}</b> ｜ 来源 ${from}`
+      + ` ｜ 单座位 ¥${d.budget_cny}${d.total_budget_cny>0?` · 全场 ¥${d.total_budget_cny}`:" · 全场不限"}`
       + ` ｜ 已用 ¥${d.total.cost_cny} · ${d.total.tokens} token`
       + ` ｜ 上下文窗口 ${d.context.keep_history} 段结算 / ${d.context.keep_messages} 条消息`
     : "还没有配置模型：展开下面的「接入设置」填 Base URL 与模型名，存一次即生效；"
@@ -1054,11 +1062,12 @@ function renderLlm(d){
       ? (s.busy?"思考中 · ":"")
         + `${u.calls||0} 次 · ${s.tokens||0} tok · ¥${(u.cost_cny||0).toFixed(3)}`
         + (u.fallbacks?` · 降级 ${u.fallbacks}`:"")
+        + (u.truncated?` · 截断 ${u.truncated}`:"")
         + (s.enabled?"":` · ${esc(s.stop_reason||"已停用")}`)
         + (s.last_error?`<i class="llmerr" title="${esc(s.last_error)}">⚠</i>`:"")
       : "人类操作";
     return `<div class="seat" data-p="${c}">
-      <input type="checkbox" data-p="${c}" ${s?"checked":""}>
+      <input type="checkbox" data-p="${c}" ${s&&s.enabled?"checked":""}>
       <span class="dot" style="background:var(--${k})"></span>
       <span class="nm">${n}</span>
       <span class="cnt">${right}</span>
@@ -1070,7 +1079,7 @@ function renderLlm(d){
       const p=box.dataset.p;
       try{
         await api("/api/llm/seat",{method:"POST",body:JSON.stringify({power:p,enabled:box.checked})});
-        toast(box.checked?(NAME[p]+" 已交给模型"):(NAME[p]+" 已收回人类"),"ok");
+        toast(box.checked?(NAME[p]+" 已交给模型"):(NAME[p]+" 已暂停，账还留着"),"ok");
         await loadLlm(); await refresh();
       }catch(e){ box.checked=!box.checked; toast(e.message,"err"); }
     };

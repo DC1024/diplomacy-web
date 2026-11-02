@@ -18,10 +18,17 @@ log = logging.getLogger("diplomacy.llm")
 
 class SeatRunner:
     def __init__(self, get_arena: Callable, seats: dict[str, LLMSeat],
-                 interval: float = 2.0):
+                 interval: float = 2.0,
+                 total_budget: Callable[[], float] | None = None,
+                 persist: Callable[[], None] | None = None):
         self._get_arena = get_arena
         self.seats = seats
         self.interval = interval
+        # 全场总闸：单座位预算管不住「七个座位各烧 ¥20」，这里补一道总预算。
+        # 传的是取值函数而不是数字，改了配置下一轮就生效，不用重建 runner。
+        self._total_budget = total_budget
+        # 座位表落盘（哪些国家交给了模型 + 各自的账），重启不丢
+        self._persist = persist
         self._acted: set[tuple[int, str]] = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -40,6 +47,7 @@ class SeatRunner:
         if state["game_over"] or state["paused"]:
             return []
 
+        halted = self._enforce_total_budget()
         results = []
         revision = arena.data["revision"]
         # 先拍快照再遍历：座位表是活的，网页上勾一个座位、或脚本收回座位，
@@ -47,10 +55,17 @@ class SeatRunner:
         # `RuntimeError: dictionary changed size during iteration`——P1 实测时真的撞上了，
         # 表现是「这一轮什么都没发生」，日志里只有一条 ERROR，很难往座位表上想。
         for power, seat in list(self.seats.items()):
-            if not seat.enabled:
-                continue
             info = state["players"].get(power, {})
             if not info.get("required") or info.get("ready"):
+                continue
+            if not seat.enabled:
+                # 钱烧完了的那一国必须有人交令，否则「结算」永远不成立，全桌陪它等。
+                # 用户自己按的暂停不在此列：那种情况一般有人接手，代下驻守反而会
+                # 把接手者的命令盖掉（后台 2 秒一轮，人还没点就被占了）。
+                if seat.autohold:
+                    self._force_holds(arena, power, seat.stop_reason or "座位已停摆")
+                    results.append(dict(power=power, skipped=True, why=seat.stop_reason,
+                                        forced_hold=True))
                 continue
             key = (revision, power)
             if key in self._acted:
@@ -65,7 +80,43 @@ class SeatRunner:
                 # 座位没报错但也没交令（比如内部提前 return）——同样要兜住
                 if seat.enabled and self._still_pending(arena, power):
                     self._force_holds(arena, power, "座位返回却没有交令")
+        if results or halted:
+            self._save()
         return results
+
+    def _enforce_total_budget(self) -> bool:
+        """全场总闸：花超了就把所有还在叫模型的座位转成「停摆 + 代驻守」。
+
+        单座位预算只能保证「每家不超过 ¥20」，七家一起撞线就是 ¥140。这一道闸是给
+        「一局 < ¥20」这个验收口径用的——撞线后**不冻桌**：座位改成 autohold，
+        由后台替它们交驻守，局面继续往前推，只是不再花钱。
+        """
+        if self._total_budget is None:
+            return False
+        try:
+            limit = float(self._total_budget() or 0)
+        except (TypeError, ValueError):
+            return False
+        if limit <= 0:      # 0 = 不限
+            return False
+        spent = sum(s.usage.cost_cny for s in self.seats.values())
+        if spent < limit:
+            return False
+        hit = [s for s in self.seats.values() if s.enabled]
+        for seat in hit:
+            seat.halt(f"全场预算已达 ¥{limit:.2f}")
+        if hit:
+            log.warning("全场花费 ¥%.4f 已达上限 ¥%.2f，%s 转为驻守", spent, limit,
+                        "、".join(s.power for s in hit))
+        return bool(hit)
+
+    def _save(self) -> None:
+        if self._persist is None:
+            return
+        try:
+            self._persist()
+        except Exception:  # 落盘失败不该让本轮白跑
+            log.exception("座位表落盘失败")
 
     def attempted(self, revision: int, power: str) -> bool:
         """后台是否已经为这个 (回合, 国家) 试过一手。
