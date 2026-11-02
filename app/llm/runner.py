@@ -9,6 +9,7 @@ import logging
 import threading
 from collections.abc import Callable
 
+from ..persist import save
 from .orders import hold_orders
 from .seats import LLMSeat
 
@@ -94,7 +95,7 @@ class SeatRunner:
             return
         try:
             if arena.settle(quiet=True):
-                arena.save()
+                save(arena)
         except ValueError:
             pass
 
@@ -108,7 +109,15 @@ class SeatRunner:
         log.info("LLM 座位线程已启动（%d 个座位，%ss 轮询）", len(self.seats), self.interval)
 
     def stop(self) -> None:
+        """停线程并等它退出。
+
+        只 `set()` 不 join 的话，线程可能正卡在 `seat.act()` 里（最长 60s 的模型调用），
+        关停之后还会再写一次存档；测试里手动驱动 `tick()` 时也会和它抢。
+        """
         self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
 
     def reset(self) -> None:
         """新开一局时调用：清掉「本回合已尝试」记录，座位本身保留。"""

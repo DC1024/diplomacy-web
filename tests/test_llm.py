@@ -25,6 +25,10 @@ def srv(tmp_path, monkeypatch):
 
     importlib.reload(main)
     with TestClient(main.app) as client:
+        # 这个文件里的用例自己驱动 tick() 或直接调 seat.act()；把 lifespan 起的后台线程停掉，
+        # 否则两个驱动者会抢同一批 (revision, power)，断言时而"已提交"时而"没动"。
+        # 线程到底会不会起，由 test_seats_and_clock.py 里那条专门的用例盯着。
+        main._runner.stop()
         yield client, main
 
 
@@ -132,11 +136,17 @@ def test_messages_from_model_respect_limits(srv):
 
 
 def test_full_game_driven_entirely_by_seats(srv):
-    """七个座位全部交给模型：整局能自己打完，不会卡死在某个阶段。"""
+    """七个座位全部交给模型：整局能自己打完，不会卡死在某个阶段。
+
+    用应用自己的 `_runner`（而不是另造一个）——那才是生产里真正驱动座位的那个对象。
+    但要把它的后台线程停掉再手动 tick：两个驱动者同时在跑，会互相把 `_acted` 里的
+    (revision, power) 抢先消化掉，断言"这一轮没人动"就失去意义了。
+    """
     client, main = srv
     client.post("/api/match")
     seats = {p: seat(main, p) for p in POWERS}
-    runner = SeatRunner(main.arena, seats, interval=0)
+    main._runner.stop()
+    runner = main._runner
 
     rounds = 0
     while rounds < 240:

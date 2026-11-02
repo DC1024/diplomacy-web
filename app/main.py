@@ -25,6 +25,7 @@ from .engine.arena import POWERS, Arena, OrderError
 from .llm import LLMSeat, SeatRunner, Usage, from_env
 from .llm import build as build_context
 from .llm.orders import hold_orders
+from .persist import save
 
 # 版本由构建期注入（Dockerfile 的 APP_VERSION 来自 git tag），避免镜像标签与 /healthz 漂移。
 # 本地直接跑时没有注入，别硬编码一个具体版本——那会让 /healthz 说谎，用 dev 占位最诚实。
@@ -124,7 +125,7 @@ def try_settle(a: Arena) -> bool:
     """所有人都交令了就结算；否则静默返回 False。"""
     try:
         if a.settle(quiet=True):
-            a.save()
+            save(a)
             return True
     except ValueError:
         pass
@@ -391,8 +392,7 @@ def admin_control(req: ControlReq, x_admin_key: Annotated[str | None, Header()] 
     a = require_arena()
     if req.action not in ("pause", "resume"):
         raise HTTPException(400, "action 只能是 pause 或 resume")
-    a.control(req.action)
-    a.save()
+    a.control(req.action)  # 内核里已经 bump + save（持锁），这里别再存一遍
     _clock.reset()
     log.info("管理员 %s 对局 %s", req.action, a.data["match_id"])
     return summary(a)

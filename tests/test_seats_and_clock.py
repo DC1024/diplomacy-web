@@ -7,11 +7,13 @@
 """
 import importlib
 import sys
+import threading
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app import persist
 from app.clock import PhaseClock
 from app.engine.arena import POWERS
 from app.llm import LLMSeat, ScriptedProvider
@@ -179,6 +181,7 @@ def test_countdown_hidden_when_clock_off(tmp_path, monkeypatch):
 def test_timeout_hold_submits_holds_and_settles(tmp_path, monkeypatch):
     client, main, _ = started(tmp_path, monkeypatch, "k")
     with client:
+        stop_background(main)
         arena = main.arena()
         assert arena.game().get_current_phase() == "S1901M"
         assert main.timeout_hold(arena, arena.admin_state()) is True
@@ -193,6 +196,7 @@ def test_timeout_hold_is_idempotent_within_the_same_revision(tmp_path, monkeypat
     """
     client, main, _ = started(tmp_path, monkeypatch, "k")
     with client:
+        stop_background(main)
         arena = main.arena()
         st = arena.admin_state()
         assert main.timeout_hold(arena, st) is True
@@ -237,6 +241,15 @@ def seat_tokens(client, ok) -> dict[str, str]:
 
 
 # ---------- 掉线托管：模型座位不能把全桌冻住 ----------
+def stop_background(main):
+    """停掉 lifespan 起的座位线程：这些用例自己驱动 `tick()` 或直接托管。
+
+    两个驱动者在同一批 (revision, power) 上会互相抢——后台先交令，用例再 tick 就"没人动"，
+    断言看起来像功能坏了。线程本身是否启动由 test_background_threads_start_with_the_asgi_app 盯着。
+    """
+    main._runner.stop()
+
+
 def model_seat(main, power, script=None) -> LLMSeat:
     s = LLMSeat(power, ScriptedProvider(script or [{"pass": True}]))
     main._seats[power] = s
@@ -251,6 +264,7 @@ def test_runner_force_holds_when_a_seat_raises(tmp_path, monkeypatch):
     """
     client, main, _ = started(tmp_path, monkeypatch, "k")
     with client:
+        stop_background(main)
         arena = main.arena()
 
         def boom(_arena):
@@ -269,6 +283,7 @@ def test_runner_force_holds_when_seat_returns_without_orders(tmp_path, monkeypat
     """座位没报错、也没交令（内部提前 return）→ 后台同样接管。"""
     client, main, _ = started(tmp_path, monkeypatch, "k")
     with client:
+        stop_background(main)
         arena = main.arena()
         main._seats["ITALY"] = LLMSeat("ITALY", ScriptedProvider([{"pass": True}]))
         main._seats["ITALY"].act = lambda _arena: dict(skipped=True, why="模拟静默返回")
@@ -280,6 +295,7 @@ def test_timeout_hold_leaves_a_busy_seat_alone(tmp_path, monkeypatch):
     """模型正在说话时别抢：抢了就是白花一次 token，还把它交的令盖掉。"""
     client, main, _ = started(tmp_path, monkeypatch, "k")
     with client:
+        stop_background(main)
         arena = main.arena()
         seat = model_seat(main, "ITALY")
         seat.busy = True
@@ -292,6 +308,7 @@ def test_timeout_hold_waits_for_a_seat_not_yet_attempted(tmp_path, monkeypatch):
     """后台 2 秒轮询还没轮到它时，不要把它这一回合废掉。"""
     client, main, _ = started(tmp_path, monkeypatch, "k")
     with client:
+        stop_background(main)
         arena = main.arena()
         model_seat(main, "ITALY")
         assert main.timeout_hold(arena, arena.admin_state()) is False
@@ -302,12 +319,46 @@ def test_timeout_hold_takes_over_a_seat_that_gave_up(tmp_path, monkeypatch):
     """试过一手、没在忙、还是没交令 → 时钟必须接管，否则全桌等一个死人。"""
     client, main, _ = started(tmp_path, monkeypatch, "k")
     with client:
+        stop_background(main)
         arena = main.arena()
         st = arena.admin_state()
         model_seat(main, "ITALY")
         main._runner._acted.add((st["revision"], "ITALY"))  # 等价于「后台试过了，没成」
         assert main.timeout_hold(arena, st) is True
         assert arena.game().get_current_phase() == "F1901M"
+
+
+# ---------- 存档串行化 ----------
+def test_concurrent_saves_do_not_collide(tmp_path, monkeypatch):
+    """两个线程同时保存不能炸。
+
+    内核的 `Arena.save()` 不持锁：写 `state.tmp` 再 `os.replace`。后台座位线程交令后保存、
+    阶段时钟托管后保存，两者撞在一起时先完成的那个已经把 tmp 改名走，后一个就
+    `FileNotFoundError`。CI 上整局回归正是这样挂的（卡在 F1918M，日志里一串
+    `FileNotFoundError: state.tmp -> state.json`）。
+    """
+    client, main, _ = started(tmp_path, monkeypatch, "k")
+    with client:
+        arena = main.arena()
+        errors: list[Exception] = []
+        start = threading.Barrier(4)
+
+        def worker() -> None:
+            try:
+                start.wait()
+                for _ in range(20):
+                    persist.save(arena)
+            except Exception as exc:  # noqa: BLE001 - 这里就是要抓住任何异常
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, errors
+        # 存完还能读回来，说明没有把存档写坏
+        assert arena.path.exists()
 
 
 def test_seat_token_cannot_read_another_power(tmp_path, monkeypatch):

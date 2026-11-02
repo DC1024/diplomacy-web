@@ -12,6 +12,7 @@ import uuid
 from dataclasses import asdict, dataclass
 
 from ..engine.arena import OrderError
+from ..persist import save
 from . import context as ctxmod
 from . import prompt as promptmod
 from .orders import hold_orders
@@ -238,7 +239,7 @@ class LLMSeat:
     def _settle(arena) -> bool:
         try:
             if arena.settle(quiet=True):
-                arena.save()
+                save(arena)
                 return True
         except ValueError:
             pass
