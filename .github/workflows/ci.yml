@@ -164,6 +164,44 @@ jobs:
         if: always()
         run: docker rm -f dw-llm || true
 
+      # 网页改配置：只有容器里才验得全——静态页要能拿到新表单、配置要落在 /data 卷上、
+      # 存完之后不重启就能把座位交出去。单测跑的是 TestClient，证不了这些。
+      - name: 模型配置冒烟（网页改配置，不重启）
+        env:
+          # 写进配置、再拿去反查响应里有没有明文。同一变量出两次，断言才不会退化成
+          # 「随便一个不存在的串自然不在响应里」。
+          CFG_SECRET: 'sk-should-not-leak-1234'
+        run: |
+          docker run -d --name dw-cfg -p 8084:8080 diplomacy-web:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8084/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS -X POST http://127.0.0.1:8084/api/match > /dev/null
+          echo "--- 默认什么都没有，来源必须是 none 而不是 env ---"
+          curl -fsS http://127.0.0.1:8084/api/llm/settings \
+            | python -c "import json,sys; s=json.load(sys.stdin)['settings']; assert s['source']=='none', s; assert s['configured'] is False, s; print('unconfigured ok')"
+          echo "--- 存一份配置（离线脚本 + 密钥），来源变 file ---"
+          curl -fsS -X PUT http://127.0.0.1:8084/api/llm/settings -H 'Content-Type: application/json' \
+            -d "{\"mode\":\"scripted\",\"budget_cny\":3,\"api_key\":\"$CFG_SECRET\"}" \
+            | python -c "import json,os,sys; s=json.load(sys.stdin)['settings']; k=os.environ['CFG_SECRET']; assert s['source']=='file', s; assert s['configured'] is True, s; assert s['budget_cny']==3, s; assert s['has_key'] is True, s; assert s['key_hint'].endswith(k[-4:]) and k not in s['key_hint'], s; print('save ok', s['key_hint'])"
+          echo "--- 密钥不能回显（连尾四位之外的任何片段都不行）---"
+          curl -fsS http://127.0.0.1:8084/api/llm/settings > /tmp/cfg.json
+          python -c "import json,os,pathlib; k=os.environ['CFG_SECRET']; t=pathlib.Path('/tmp/cfg.json').read_text(); assert k not in t, 'key leaked: '+t; s=json.loads(t)['settings']; assert 'api_key' not in s, s; print('no leak ok')"
+          echo "--- 存完就能把座位交给模型，不需要重启 ---"
+          curl -fsS -X POST http://127.0.0.1:8084/api/llm/seat -H 'Content-Type: application/json' \
+            -d '{"power":"ITALY"}' \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['enabled'] is True, d; assert d['seat']['provider']=='scripted', d; print('seat ok')"
+          echo "--- 配置真的落在 /data 卷里（换容器也还在）---"
+          docker exec dw-cfg sh -c 'test -s /data/llm.json && grep -q scripted /data/llm.json' \
+            && echo "file ok"
+      - name: 失败时打印配置日志
+        if: failure()
+        run: docker logs dw-cfg || true
+      - name: 清理配置容器
+        if: always()
+        run: docker rm -f dw-cfg || true
+
       # 阶段时钟：没人交令时它必须自己把局面推下去。
       # 这是「一个人挂机不会冻住全桌」唯一的端到端证明——单测只能证明函数逻辑，证不了线程真的在跑。
       - name: 阶段时钟冒烟

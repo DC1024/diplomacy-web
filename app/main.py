@@ -25,8 +25,9 @@ from pydantic import BaseModel, Field
 
 from .clock import PhaseClock
 from .engine.arena import POWERS, Arena, OrderError
-from .llm import LLMSeat, SeatRunner, Usage, from_env
+from .llm import LLMSeat, SeatRunner, Usage, probe
 from .llm import build as build_context
+from .llm import settings as llm_settings
 from .llm.orders import hold_orders
 from .map_data import geometry
 from .persist import save
@@ -61,12 +62,6 @@ _arena: Arena | None = None
 # ---- LLM 座位（B1）----
 _seats: dict[str, LLMSeat] = {}
 _runner = SeatRunner(lambda: _arena, _seats, interval=float(os.environ.get("LLM_INTERVAL", "2")))
-
-DEFAULT_BUDGET = float(os.environ.get("LLM_BUDGET_CNY", "20"))
-PRICE_IN = float(os.environ.get("LLM_PRICE_IN", "2"))    # ¥ / 百万 input token
-PRICE_OUT = float(os.environ.get("LLM_PRICE_OUT", "8"))  # ¥ / 百万 output token
-KEEP_HIST = int(os.environ.get("LLM_KEEP_HIST", "3"))
-KEEP_MSGS = int(os.environ.get("LLM_KEEP_MSGS", "30"))
 
 # 阶段时钟：0 = 关闭。多人对局建议 300～900 秒；热座一个人操作七国时开着只会添乱。
 PHASE_SECONDS = float(os.environ.get("PHASE_SECONDS", "0"))
@@ -543,11 +538,31 @@ class SeatReq(BaseModel):
     budget_cny: float | None = Field(None, description="本局预算，超出后自动转保底驻守")
 
 
+class SettingsReq(BaseModel):
+    """网页上的模型配置。所有字段都可缺省，缺省即「不改这一项」。"""
+    mode: str | None = Field(None, description="openai = 兼容 /v1/chat/completions；scripted = 离线演练")
+    base_url: str | None = None
+    api_key: str | None = Field(None, description="留空表示沿用已保存的密钥，不会被清空")
+    clear_key: bool = Field(False, description="要真的清掉密钥才传 true")
+    model: str | None = None
+    timeout: float | None = Field(None, ge=5, le=600)
+    price_in: float | None = Field(None, ge=0, description="¥ / 百万 input token")
+    price_out: float | None = Field(None, ge=0, description="¥ / 百万 output token")
+    budget_cny: float | None = Field(None, gt=0, description="单座位预算，超出自动转保底驻守")
+    keep_hist: int | None = Field(None, ge=0, le=50, description="上下文：最近几段结算")
+    keep_msgs: int | None = Field(None, ge=0, le=500, description="上下文：最近几条消息")
+
+    def patch(self) -> dict:
+        """只把**用户真的传了**的字段挑出来，未传的不能当成空值覆盖掉旧配置。"""
+        return {k: v for k, v in self.model_dump(exclude_unset=True).items() if v is not None}
+
+
 def provider_or_400():
-    provider = from_env()
+    cfg = llm_settings.current()
+    provider = cfg.build_provider()
     if provider is None:
-        raise HTTPException(400, "未配置模型：请设置 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL"
-                                 "（或 LLM_PROVIDER=scripted 做离线演练）")
+        raise HTTPException(400, "未配置模型：在「模型」页签填 Base URL 与模型名（存一次即生效），"
+                                 "或用 LLM_PROVIDER=scripted 做离线演练")
     return provider
 
 
@@ -576,17 +591,72 @@ def admin_settle(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
 @app.get("/api/llm")
 def llm_status() -> dict:
     """当前有哪些 LLM 座位、花了多少、上下文窗口多大。"""
-    provider = from_env()
+    cfg = llm_settings.current()
     return dict(
-        configured=provider is not None,
-        provider=getattr(provider, "name", None),
-        budget_cny=DEFAULT_BUDGET,
-        price=dict(input=PRICE_IN, output=PRICE_OUT),
-        context=dict(keep_history=KEEP_HIST, keep_messages=KEEP_MSGS),
+        configured=cfg.configured,
+        provider=getattr(cfg.build_provider(), "name", None),
+        source=cfg.source,
+        model=cfg.model,
+        budget_cny=cfg.budget_cny,
+        price=dict(input=cfg.price_in, output=cfg.price_out),
+        context=dict(keep_history=cfg.keep_hist, keep_messages=cfg.keep_msgs),
         seats={p: s.status() for p, s in _seats.items()},
         total=dict(tokens=sum(s.usage.tokens for s in _seats.values()),
                    cost_cny=round(sum(s.usage.cost_cny for s in _seats.values()), 4)),
     )
+
+
+# ---- 模型配置：网页里填，存一次即生效（原先是环境变量 + 重启）----
+
+@app.get("/api/llm/settings")
+def llm_get_settings(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """当前生效的配置（**不含原始密钥**，只给尾四位）。
+
+    要管理员：`base_url` 可能是一个内网地址，密钥虽被掩码，凑齐「网关地址 + 模型名」
+    也足够画出部署拓扑。页面上这个页签本来也只对管理员显示。
+    """
+    require_admin(x_admin_key)
+    cfg = llm_settings.current()
+    return dict(settings=cfg.public(), path=str(llm_settings.config_path()),
+                editable=True)
+
+
+@app.put("/api/llm/settings")
+def llm_put_settings(req: SettingsReq, x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """保存配置，并立刻推到已经在跑的座位上。
+
+    「存完还要重启」是最容易让人以为没保存成功的行为，所以这里顺手做两件事：
+    已有座位换 provider、回填价格/预算/上下文窗口；预算调高了还会把因超额停掉的座位放回来。
+    """
+    require_admin(x_admin_key)
+    cfg = llm_settings.update(req.patch())
+    for llm_seat in _seats.values():
+        cfg.apply_to(llm_seat)
+    log.info("模型配置已由管理员更新（来源 %s，模式 %s）", cfg.source, cfg.mode)
+    return dict(settings=cfg.public(), seats={p: s.status() for p, s in _seats.items()})
+
+
+@app.post("/api/llm/settings/test")
+def llm_test_settings(req: SettingsReq | None = None,
+                      x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """拿**表单里刚填的**配置真发一次请求，不落盘。
+
+    先测后存：填错 base_url 是 404、模型名错是 400、密钥错是 401，三种在页面上都只表现为
+    「没反应」，真发一次才能把这三种分开。不落盘是有意的——测不通的配置不该覆盖能用的那份。
+    """
+    require_admin(x_admin_key)
+    cfg = llm_settings.current()
+    if req is not None:
+        cfg = cfg.merged(req.patch())
+    provider = cfg.build_provider()
+    if provider is None:
+        return dict(ok=False, ms=0, error="配置不完整：至少要有 Base URL 与模型名")
+    result = probe(provider)
+    result["settings"] = cfg.public()
+    if result.get("error"):
+        # 网关的报错经常原样回显请求头，抹一遍再回给页面
+        result["error"] = llm_settings.redact(str(result["error"]), cfg.api_key)
+    return result
 
 
 @app.post("/api/llm/seat")
@@ -601,10 +671,11 @@ def llm_seat(req: SeatReq, x_admin_key: Annotated[str | None, Header()] = None) 
         _seats.pop(power, None)
         return dict(power=power, enabled=False, seats={p: s.status() for p, s in _seats.items()})
 
+    cfg = llm_settings.current()
     seat = LLMSeat(power, provider_or_400(), persona=req.persona,
-                   budget_cny=req.budget_cny if req.budget_cny is not None else DEFAULT_BUDGET,
-                   price_in=PRICE_IN, price_out=PRICE_OUT,
-                   keep_hist=KEEP_HIST, keep_msgs=KEEP_MSGS)
+                   budget_cny=req.budget_cny if req.budget_cny is not None else cfg.budget_cny,
+                   price_in=cfg.price_in, price_out=cfg.price_out,
+                   keep_hist=cfg.keep_hist, keep_msgs=cfg.keep_msgs)
     _seats[power] = seat
     return dict(power=power, enabled=True, seat=seat.status())
 
@@ -621,7 +692,8 @@ def llm_context(power: str, x_admin_key: Annotated[str | None, Header()] = None)
     """看一眼某个座位本回合会收到什么上下文——用来核对 token 预算是否真的收住了。"""
     require_admin(x_admin_key)
     a = require_arena()
-    ctx = build_context(a, power.upper(), KEEP_HIST, KEEP_MSGS)
+    cfg = llm_settings.current()
+    ctx = build_context(a, power.upper(), cfg.keep_hist, cfg.keep_msgs)
     # 四个字段原样拼起来就是 `as_prompt()`：调试面板看到的必须等于模型真收到的
     return dict(power=power.upper(), digest=ctx.digest, own=ctx.own, note=ctx.note,
                 text=ctx.text,

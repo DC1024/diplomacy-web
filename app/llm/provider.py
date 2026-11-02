@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urlparse
 
 
 class ProviderError(RuntimeError):
@@ -55,12 +57,47 @@ class ScriptedProvider:
         return Reply(text=text, prompt_tokens=len(system + user) // 2, completion_tokens=len(text) // 2)
 
 
+def normalize_base(url: str) -> str:
+    """把用户手填的各种写法收成一个根地址。
+
+    页面上让人只填一次，就必须容忍他填 `https://api.x.com/v1/`、
+    `https://api.x.com/v1/chat/completions`、甚至带空格的复制粘贴。
+    只做「去掉多余后缀」这一件事，不猜该补 `/v1`——补错了会得到更难懂的报错。
+    """
+    u = (url or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/completions"):
+        if u.endswith(suffix):
+            u = u[: -len(suffix)].rstrip("/")
+    return u
+
+
+def _is_private_host(url: str) -> bool:
+    """这个地址该不该绕过代理。
+
+    httpx 默认 `trust_env=True`，会照 `HTTP_PROXY` / `HTTPS_PROXY` 走。本机或局域网里
+    的网关（ollama `127.0.0.1:11434`、new-api `192.168.1.10:3000`）一旦被塞进外网代理，
+    得到的是 **502 upstream connect failed**——报错看起来像「网关挂了」，实际只是绕错了路。
+    反过来的错误更要命：为了绕开代理而全局 `trust_env=False`，会让需要代理才能连上的
+    `api.openai.com` 直接不通。所以按目标地址判断，而不是一刀切。
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if host in ("localhost", "::1") or host.endswith(".local"):
+        return True
+    if host.startswith("127.") or host.startswith("10.") or host.startswith("192.168."):
+        return True
+    # 172.16.0.0/12
+    parts = host.split(".")
+    if len(parts) == 4 and parts[0] == "172" and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+        return True
+    return False
+
+
 class OpenAICompatProvider:
     """OpenAI 兼容的 /v1/chat/completions（new-api、vLLM、官方 API 都适用）。"""
 
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 60.0):
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+        self.base_url = normalize_base(base_url)
+        self.api_key = (api_key or "").strip()
         self.model = model
         self.timeout = timeout
         self.name = f"openai:{model}"
@@ -75,10 +112,14 @@ class OpenAICompatProvider:
             "temperature": 0.7,
             "max_tokens": 900,
         }
+        # 本机 ollama / vLLM / 内网网关常常不校验密钥，空 key 时不发这个头，
+        # 免得 `Authorization: Bearer ` 被某些网关判成「给了个错的凭证」而 401
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        url = f"{self.base_url}/chat/completions"
         try:
-            r = httpx.post(f"{self.base_url}/chat/completions", json=payload,
-                           headers={"Authorization": f"Bearer {self.api_key}"},
-                           timeout=self.timeout)
+            with httpx.Client(timeout=self.timeout,
+                              trust_env=not _is_private_host(self.base_url)) as client:
+                r = client.post(url, json=payload, headers=headers)
         except httpx.HTTPError as exc:
             raise ProviderError(f"请求失败：{exc}") from exc
         if r.status_code != 200:
@@ -95,13 +136,44 @@ class OpenAICompatProvider:
 
 
 def from_env() -> Provider | None:
-    """按环境变量造一个 provider。没有配置就返回 None（= LLM 座位不可用）。"""
+    """按环境变量造一个 provider。没有配置就返回 None（= LLM 座位不可用）。
+
+    保留这个入口是为了兼容 `docker run -e LLM_*` 的老用法；正常路径走
+    `settings.current()`——它优先读网页保存的配置。
+    """
     kind = os.environ.get("LLM_PROVIDER", "").strip().lower()
     if kind == "scripted":
         return ScriptedProvider()
     base = os.environ.get("LLM_BASE_URL", "").strip()
     key = os.environ.get("LLM_API_KEY", "").strip()
     model = os.environ.get("LLM_MODEL", "").strip()
-    if not (base and key and model):
+    if not (base and model):
         return None
-    return OpenAICompatProvider(base, key, model, float(os.environ.get("LLM_TIMEOUT", "60")))
+    return OpenAICompatProvider(base, key, model, float(os.environ.get("LLM_TIMEOUT", "60") or 60))
+
+
+def probe(provider: Provider, *, timeout: float = 20.0) -> dict:
+    """真发一次最小请求，验证 base_url / 密钥 / 模型名三样都对得上。
+
+    为什么必须真发：填错 base_url 是 404，填错模型名是 400 且报错文本因供应商而异，
+    密钥错是 401——这三种在页面上长得一模一样（都只是「没反应」）。花几厘钱
+    换一次确定的答复，比让用户回到对局里等一回合失败划算。
+
+    超时按 `min(timeout, 配置的 timeout)` 收短：一个连两句话都答不完的网关，
+    放进对局只会白占着阶段时钟。
+    """
+    limit = min(timeout, float(getattr(provider, "timeout", timeout) or timeout))
+    started = time.monotonic()
+    try:
+        if isinstance(provider, OpenAICompatProvider):
+            provider = OpenAICompatProvider(provider.base_url, provider.api_key,
+                                            provider.model, timeout=limit)
+        reply = provider.chat("你在做连通性自检。", "只回复两个字：通了")
+    except ProviderError as exc:
+        return dict(ok=False, ms=int((time.monotonic() - started) * 1000), error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - 自检不该把任何异常抛给页面
+        return dict(ok=False, ms=int((time.monotonic() - started) * 1000),
+                    error=f"{type(exc).__name__}: {exc}")
+    return dict(ok=True, ms=int((time.monotonic() - started) * 1000),
+                model=getattr(provider, "model", ""), text=(reply.text or "")[:120],
+                tokens=reply.tokens)

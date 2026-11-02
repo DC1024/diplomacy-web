@@ -16,7 +16,8 @@ services:
       ADMIN_KEY: ${ADMIN_KEY:-}
       # 每阶段限时（秒）。0 = 不限时，适合一个人慢慢想；多人真打建议 300。
       PHASE_SECONDS: ${PHASE_SECONDS:-0}
-      # 接模型时填任意 OpenAI 兼容端点，其余可留空
+      # 接模型：网页「模型 → 接入设置」里填一次就生效，不用改这里。
+      # 下面三项只作**默认值**——网页保存过配置后，以 data/llm.json 为准。
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
