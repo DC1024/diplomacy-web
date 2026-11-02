@@ -19,6 +19,8 @@ header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:
 .phase{margin-left:auto;font-size:13px;color:var(--accent);font-variant-numeric:tabular-nums}
 header button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 11px;font-size:13px;cursor:pointer}
 header button:hover{border-color:var(--muted)}
+header input.adm{width:130px;padding:5px 9px;font-size:12px;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:6px}
+header input.adm.bad{border-color:var(--bad)}
 main{flex:1;display:flex;min-height:0}
 aside{width:200px;border-right:1px solid var(--line);padding:10px;overflow:auto;flex-shrink:0}
 .seat{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;margin-bottom:3px}
@@ -68,6 +70,7 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
   <div class="brand">七国<b>纵横</b></div>
   <span class="tag">B0 · 热座</span>
   <div class="phase" id="phase">读取中…</div>
+  <input id="adminKey" class="adm" type="password" placeholder="管理密钥" autocomplete="off" hidden>
   <button id="btnRefresh">刷新</button>
   <button id="btnNew">新局</button>
 </header>
@@ -118,7 +121,7 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
 const POWERS=[["AUSTRIA","奥地利","a"],["ENGLAND","英国","e"],["FRANCE","法国","f"],["GERMANY","德国","g"],["ITALY","意大利","i"],["RUSSIA","俄国","r"],["TURKEY","土耳其","t"]];
 const NAME=Object.fromEntries(POWERS.map(([c,n])=>[c,n]));
 const KEY="dw.prefs.v1";
-let tokens={}, seat="ITALY", timer=null, busy=false;
+let tokens={}, seat="ITALY", timer=null, busy=false, adminKey="";
 
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
@@ -128,16 +131,39 @@ function toast(msg,kind=""){const t=$("#toast");t.textContent=msg;t.className="s
 async function api(path,opt={}){
   const h=Object.assign({},opt.headers||{});
   if(tokens[seat]) h["X-Seat-Token"]=tokens[seat];
+  if(adminKey) h["X-Admin-Key"]=adminKey;
   if(opt.body) h["Content-Type"]="application/json";
   const r=await fetch(path,Object.assign({},opt,{headers:h}));
   const txt=await r.text();
   let d={}; try{d=JSON.parse(txt)}catch(e){d={detail:txt.slice(0,300)}}
-  if(!r.ok) throw new Error(d.detail||("HTTP "+r.status));
+  if(!r.ok){
+    if(r.status===403 && String(d.detail||"").includes("管理员密钥")) showAdmin(true);
+    throw new Error(d.detail||("HTTP "+r.status));
+  }
   return d;
 }
 
-function save(){localStorage.setItem(KEY,JSON.stringify({tokens,seat}));}
-function load(){try{const v=JSON.parse(localStorage.getItem(KEY)||"{}");tokens=v.tokens||{};seat=v.seat||"ITALY";}catch(e){}}
+function showAdmin(bad){
+  const el=$("#adminKey");
+  el.hidden=false;
+  if(bad){ el.classList.add("bad"); el.focus(); }
+}
+
+function save(){localStorage.setItem(KEY,JSON.stringify({tokens,seat,adminKey}));}
+function load(){
+  try{
+    const v=JSON.parse(localStorage.getItem(KEY)||"{}");
+    tokens=v.tokens||{}; seat=v.seat||"ITALY"; adminKey=v.adminKey||"";
+  }catch(e){}
+  if(adminKey) $("#adminKey").value=adminKey;
+}
+
+$("#adminKey").oninput=()=>{
+  adminKey=$("#adminKey").value.trim();
+  $("#adminKey").classList.remove("bad");
+  save();
+};
+$("#adminKey").onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); boot(); } };
 
 function renderSeats(st){
   const el=$("#seats");
@@ -169,8 +195,16 @@ function renderBrief(text){
   }).join("");
 }
 
+let lastErr="";
+
 async function refresh(){
   if(busy) return;
+  if(!tokens[seat]){
+    // 还没建局（多半是等管理密钥）：把空状态画出来，别让页面看着像坏了
+    renderSeats(null);
+    $("#phase").textContent=adminKey?"等待开局":"等待管理密钥";
+    return;
+  }
   try{
     const st=await api("/api/state");
     renderSeats(st);
@@ -181,19 +215,36 @@ async function refresh(){
       $("#banner").classList.remove("hidden");
       $("#banner").textContent="对局已结束："+(st.result_text||"")+"　点右上「新局」重开。";
     }
-  }catch(e){ $("#phase").textContent="连接失败"; toast(e.message,"err"); }
+    lastErr="";
+  }catch(e){
+    $("#phase").textContent="连接失败";
+    if(e.message!==lastErr){ toast(e.message,"err"); lastErr=e.message; }
+  }
 }
 
 async function boot(){
   load();
   try{
+    const h=await api("/healthz");
+    if(h.admin_required) showAdmin(false);
     const d=await api("/api/match",{method:"POST"});
     tokens=d.tokens;
     if(!tokens[seat]) seat="ITALY";
     save();
     renderSeats(d.summary);
+    $("#adminKey").classList.remove("bad");
     await refresh();
-  }catch(e){ toast("建局失败："+e.message,"err"); }
+  }catch(e){
+    const needKey=String(e.message||"").includes("管理员密钥");
+    toast(needKey ? "需要管理密钥：请在右上角输入后按回车" : "建局失败："+e.message,"err");
+    $("#phase").textContent=needKey?"等待管理密钥":"连接失败";
+    $("#brief").innerHTML='<div class="ln h2">尚未开局</div><div class="ln">'
+      + (needKey
+          ? "本服务已启用管理员密钥：在右上角输入后按回车即可开局。"
+          : "服务端未创建对局，请点右上「新局」。")
+      + "</div>";
+    renderSeats(null);
+  }
   clearInterval(timer); timer=setInterval(refresh,5000);
 }
 

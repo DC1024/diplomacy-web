@@ -85,3 +85,27 @@ jobs:
       - name: 清理绑定挂载
         if: always()
         run: docker rm -f dw-bind || true
+
+      # 管理面：设了 ADMIN_KEY 后，无密钥的建局必须被拒（否则等于公开全部私信）
+      - name: 管理密钥冒烟
+        run: |
+          docker run -d --name dw-adm -p 8082:8080 -e ADMIN_KEY=smoke diplomacy-web:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8082/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          echo "--- healthz ---"
+          curl -fsS http://127.0.0.1:8082/healthz \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['admin_required'] is True, d; print('admin_required ok')"
+          echo "--- 无密钥应 403 ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8082/api/match)
+          test "$code" = "403" && echo "403 ok"
+          echo "--- 带密钥应 200 且 7 个令牌 ---"
+          curl -fsS -X POST http://127.0.0.1:8082/api/match -H 'X-Admin-Key: smoke' \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['tokens'])==7, d; print('gated match ok')"
+      - name: 失败时打印管理密钥日志
+        if: failure()
+        run: docker logs dw-adm || true
+      - name: 清理管理密钥容器
+        if: always()
+        run: docker rm -f dw-adm || true

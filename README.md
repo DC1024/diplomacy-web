@@ -94,6 +94,8 @@ A PAR B                增兵
 | 幂等提交（`request_id`，前端重试不会双发） | ✅ |
 | 收件箱 / 历史结算查询 | ✅ |
 | 一键新局（旧存档自动备份） | ✅ |
+| 整局打满（1901→终局，约 55 阶段） | ✅ 有回归测试 |
+| 管理密钥保护建局/清档 | ✅ `ADMIN_KEY` |
 | Docker / compose / 健康检查 | ✅ |
 | 地图可视化 | ❌ 文字界面 |
 | LLM 玩家 | ❌ 下一版 |
@@ -130,9 +132,25 @@ Arena（app/engine/arena.py，vendored）
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
 | `DATA_DIR` | `./data` | 存档目录（Docker 里是 `/data`） |
+| `ADMIN_KEY` | 空 | 管理员密钥。**留空时建局/清档不鉴权，只适合本机单人** |
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `PORT` | `8080` | 端口 |
 | `LOG_LEVEL` | `info` | 日志级别 |
+
+### 关于 `ADMIN_KEY`（对外部署必读）
+
+`POST /api/match` 会一次性返回全部 7 个座位令牌——热座模式下这是便利，**挂到公网就等于
+把全场私信公开**。因此：
+
+- 本机自己玩：留空，打开页面即开局。
+- 给别人访问：必须设 `ADMIN_KEY`。设置后建局与清档需要密钥，页面右上角会出现输入框。
+
+```bash
+docker run -d -p 8080:8080 -e ADMIN_KEY="$(openssl rand -hex 16)" \
+  -v "$PWD/data:/data" ghcr.io/dc1024/diplomacy-web:latest
+```
+
+`GET /healthz` 里的 `admin_required` 反映当前是否为受保护状态。
 
 ---
 
@@ -152,6 +170,8 @@ CI 在每次 push 时跑 lint + 测试 + 构建镜像 + 容器冒烟。推 `v*` 
 ---
 
 ## 路线
+
+进度、待办与验收标准见 [TODO.md](TODO.md)。
 
 - **B0（当前）** 单局热座，文字界面
 - **B1** LLM 座位：`function calling` 直连 + 滚动摘要控成本，一个人打 6 个模型

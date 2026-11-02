@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import threading
@@ -25,6 +26,9 @@ VERSION = os.environ.get("APP_VERSION", "0.1.0")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 STATE_PATH = DATA_DIR / "state.json"
 STATIC_DIR = Path(__file__).parent / "static"
+
+# 管理密钥：留空表示"本机单人"模式，建局/清档不鉴权；一旦对外开放必须设置。
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "").strip()
 
 log = logging.getLogger("diplomacy")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "info").upper(),
@@ -56,6 +60,14 @@ def seat(a: Arena, token: str | None) -> str:
         return a.identity(token)
     except PermissionError:
         raise HTTPException(403, "座位令牌无效") from None
+
+
+def require_admin(key: str | None) -> None:
+    """设置了 ADMIN_KEY 才校验；留空时放行（本机单人模式）。"""
+    if not ADMIN_KEY:
+        return
+    if not key or not hmac.compare_digest(key, ADMIN_KEY):
+        raise HTTPException(403, "需要管理员密钥：请在页面右上角填写，或传 X-Admin-Key 请求头")
 
 
 def summary(a: Arena) -> dict:
@@ -111,13 +123,18 @@ class ResetReq(BaseModel):
 
 @app.get("/healthz")
 def healthz() -> dict:
-    return dict(ok=True, version=VERSION, has_match=arena() is not None)
+    return dict(ok=True, version=VERSION, has_match=arena() is not None, admin_required=bool(ADMIN_KEY))
 
 
 @app.post("/api/match")
-def new_match() -> dict:
-    """建局或返回现有对局。热座模式：一次返回全部 7 个座位令牌。"""
+def new_match(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    """建局或返回现有对局。热座模式：一次返回全部 7 个座位令牌。
+
+    这个接口会吐出全部座位令牌（等于交出所有私信），设置 ADMIN_KEY 后必须带密钥，
+    否则任何拿到地址的人都能读全场的私信。
+    """
     global _arena
+    require_admin(x_admin_key)
     with _lock:
         a = arena()
         if a is None:
@@ -130,11 +147,12 @@ def new_match() -> dict:
 
 
 @app.post("/api/reset")
-def reset(req: ResetReq) -> dict:
+def reset(req: ResetReq, x_admin_key: Annotated[str | None, Header()] = None) -> dict:
     """开新局。必须显式确认，避免误清存档。"""
     global _arena
     if not req.confirm:
         raise HTTPException(400, "需要 confirm=true 才会清空当前对局")
+    require_admin(x_admin_key)
     with _lock:
         _arena = None
         if STATE_PATH.exists():
@@ -247,6 +265,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 def main() -> None:
     import uvicorn
 
+    if not ADMIN_KEY:
+        log.warning("未设置 ADMIN_KEY：/api/match 会把 7 个座位令牌发给任何访问者，"
+                    "任何人也能清档。仅供本机单人使用；对外部署请设置 ADMIN_KEY=<长随机串>。")
     uvicorn.run(app, host=os.environ.get("HOST", "0.0.0.0"),
                 port=int(os.environ.get("PORT", "8080")), workers=1, log_level="info")
 

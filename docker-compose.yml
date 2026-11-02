@@ -12,4 +12,6 @@ services:
     environment:
       DATA_DIR: /data
       LOG_LEVEL: info
+      # 本机自己玩可留空；对外访问务必设置（未设置时建局接口会吐出全部座位令牌）
+      ADMIN_KEY: ${ADMIN_KEY:-}
     restart: unless-stopped
