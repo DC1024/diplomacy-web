@@ -35,6 +35,8 @@ jobs:
           push: false
           load: true
           tags: diplomacy-web:ci
+          build-args: |
+            APP_VERSION=ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: 容器冒烟
@@ -44,8 +46,9 @@ jobs:
             if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          echo "--- healthz ---"
-          curl -fsS http://127.0.0.1:8080/healthz
+          echo "--- healthz（版本应为 ci）---"
+          curl -fsS http://127.0.0.1:8080/healthz \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['version']=='ci', d; print('version ok:', d)"
           echo
           echo "--- 建局 ---"
           curl -fsS -X POST http://127.0.0.1:8080/api/match \
@@ -56,3 +59,29 @@ jobs:
       - name: 清理
         if: always()
         run: docker rm -f dw || true
+
+      # 回归测试：绑定挂载一个属主不是 10001 的目录（Linux 上最典型的部署方式），
+      # 早期版本会因 /data 不可写而在建局时 500。CI 的裸跑冒烟测不出来。
+      - name: 绑定挂载冒烟（权限回归）
+        run: |
+          mkdir -p /tmp/dwdata
+          ls -ld /tmp/dwdata
+          docker run -d --name dw-bind -p 8081:8080 \
+            -v /tmp/dwdata:/data -e DATA_DIR=/data diplomacy-web:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8081/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          echo "--- 建局（绑定挂载）---"
+          curl -fsS -X POST http://127.0.0.1:8081/api/match \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['tokens'])==7, d; print('bind mount ok, phase', d['phase'])"
+          echo "--- 落盘检查 ---"
+          test -f /tmp/dwdata/state.json && echo "state.json written by uid $(stat -c %u /tmp/dwdata/state.json)"
+          echo "--- 进程身份 ---"
+          docker exec dw-bind id
+      - name: 失败时打印绑定挂载日志
+        if: failure()
+        run: docker logs dw-bind || true
+      - name: 清理绑定挂载
+        if: always()
+        run: docker rm -f dw-bind || true

@@ -20,7 +20,8 @@ from pydantic import BaseModel, Field
 
 from .engine.arena import POWERS, Arena, OrderError
 
-VERSION = "0.1.0"
+# 版本由构建期注入（Dockerfile 的 APP_VERSION 来自 git tag），避免镜像标签与 /healthz 漂移
+VERSION = os.environ.get("APP_VERSION", "0.1.0")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 STATE_PATH = DATA_DIR / "state.json"
 STATIC_DIR = Path(__file__).parent / "static"

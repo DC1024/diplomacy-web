@@ -6,6 +6,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
+      # 绑定挂载即可：入口脚本会把 /data 属主修正为 10001 再降权运行。
+      # 想彻底不给容器 root 权限，改成命名卷并加 user: "10001:10001"。
       - ./data:/data
     environment:
       DATA_DIR: /data
