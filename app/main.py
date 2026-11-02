@@ -430,6 +430,43 @@ def history(x_seat_token: Annotated[str | None, Header()] = None,
     return dict(text=text)
 
 
+@app.get("/api/replay")
+def replay(x_seat_token: Annotated[str | None, Header()] = None) -> dict:
+    """复盘：逐阶段回放，视角永远锁在调用者的座位上。
+
+    私信是最容易在这里漏的东西——`inbox(power, phase=...)` 本身按座位过滤，
+    所以一局打完后，任何人拿自己的令牌只能看到「自己收到/发出的那些信」。
+    不要为了「看起来完整」去返回全量 messages，那等于把复盘页做成偷看面板。
+    """
+    a = require_arena()
+    power = seat(a, x_seat_token)
+    with a.lock:
+        history = list(a.data["history"])
+        items = []
+        for i, rec in enumerate(history, 1):
+            phase = rec["phase"]
+            centers = rec.get("centers") or {}
+            items.append(dict(
+                index=i,
+                phase=phase,
+                time=rec.get("time"),
+                agreed_draw=rec.get("event") == "agreed_draw",
+                text=a.history_text(power, phase),
+                centers={p: len(c) for p, c in centers.items() if c},
+                messages=a.inbox(power, phase=phase),
+            ))
+        current = a.game().get_current_phase()
+        stage = a.data["stage"]
+        return dict(
+            power=power,
+            items=items,
+            current_phase=current,
+            settled=len(items),
+            stage=stage,
+            result_text=a.result_text() if stage == "done" else "",
+        )
+
+
 @app.post("/api/send")
 def send(req: SendReq, x_seat_token: Annotated[str | None, Header()] = None) -> dict:
     return _act(x_seat_token, dict(action="send", to=req.to, text=req.text))

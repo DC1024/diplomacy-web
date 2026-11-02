@@ -61,6 +61,12 @@ textarea{resize:vertical;min-height:90px;font-family:ui-monospace,Consolas,monos
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .hint{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.7}
 pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:10px;font-size:12px;white-space:pre-wrap;max-height:280px;overflow:auto;margin:10px 0 0}
+select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:13px;max-width:100%}
+/* 复盘页那行：下拉按内容宽度长，别被 .row 的 flex:1 拉到半屏 */
+.rrow{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.rrow>div{flex:0 1 auto;min-width:0}
+.rrow select{min-width:260px;max-width:420px}
+.rrow .btn{margin-top:0}
 #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--accent);padding:10px 16px;border-radius:6px;font-size:13px;max-width:80vw;opacity:0;pointer-events:none;transition:opacity .2s;white-space:pre-wrap}
 #toast.show{opacity:1}
 #toast.err{border-left-color:var(--bad)}
@@ -125,6 +131,7 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
       <button data-tab="send">发信</button>
       <button data-tab="orders">军令</button>
       <button data-tab="inbox">收件箱</button>
+      <button data-tab="replay">复盘</button>
       <button data-tab="llm">模型</button>
       <button data-tab="admin" id="tabAdmin">管理</button>
     </div>
@@ -157,6 +164,16 @@ pre.out{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
       </div>
       <button class="btn" id="btnInbox">查询</button>
       <pre class="out" id="inboxOut">—</pre>
+    </div>
+
+    <div class="pane" id="pane-replay">
+      <div class="rrow">
+        <div><label>阶段</label><select id="replayPick"></select></div>
+        <button class="btn ghost" id="btnReplay">刷新复盘</button>
+      </div>
+      <div class="hint" id="replayMeta">选一个阶段，回看当轮结算与你自己参与的私信。</div>
+      <pre class="out hidden" id="replayOut"></pre>
+      <div class="hint">复盘锁在你的座位上：别国的往来信件不会出现在这里。</div>
     </div>
 
     <div class="pane" id="pane-llm">
@@ -471,6 +488,7 @@ document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
   document.querySelectorAll(".pane").forEach(p=>p.classList.toggle("on",p.id==="pane-"+b.dataset.tab));
   history.replaceState(null,"","#"+b.dataset.tab);
   if(b.dataset.tab==="llm") loadLlm();
+  if(b.dataset.tab==="replay") loadReplay();
 });
 (function initTab(){
   const want=(location.hash||"").replace("#","");
@@ -517,6 +535,53 @@ $("#btnInbox").onclick=async()=>{
     $("#inboxOut").textContent=d.text;
   }catch(e){ toast(e.message,"err"); }
 };
+
+// ---------- 复盘页签 ----------
+let replayData=null;
+
+function showReplayPhase(phase){
+  const el=$("#replayOut");
+  el.classList.remove("hidden");
+  const it=(replayData&&replayData.items||[]).find(i=>i.phase===phase);
+  if(!it){ el.textContent="没有这个阶段。"; return; }
+  // inbox 的「没有符合条件的消息。」是给查询接口看的文案，这里换成更贴合复盘的说法
+  const msgs=!it.messages||it.messages==="没有符合条件的消息。"
+    ? "（这一阶段没有你相关的往来信件）" : it.messages;
+  el.textContent=it.text+"\n\n【本阶段你的信件】\n"+msgs;
+}
+
+async function loadReplay(){
+  if(!tokens[seat]){
+    $("#replayOut").classList.remove("hidden");
+    $("#replayOut").textContent="对局还没开始。";
+    return;
+  }
+  try{
+    const d=await api("/api/replay");
+    replayData=d;
+    const sel=$("#replayPick");
+    const keep=sel.value;
+    sel.innerHTML=(d.items||[]).map(it=>{
+      const total=Object.values(it.centers||{}).reduce((a,b)=>a+b,0);
+      return `<option value="${it.phase}">第 ${it.index} / ${d.settled} 阶段 · ${it.phase}`
+        + `${it.agreed_draw?"（和局）":""} · ${total} 中心</option>`;
+    }).join("") || '<option value="">还没有结算</option>';
+
+    if(!d.items||!d.items.length){
+      $("#replayOut").classList.remove("hidden");
+      $("#replayOut").textContent="还没有结算记录。\n当前阶段："+d.current_phase;
+    }else{
+      const pick=(keep&&d.items.some(i=>i.phase===keep))?keep:d.items[d.items.length-1].phase;
+      sel.value=pick;
+      showReplayPhase(pick);
+    }
+    $("#replayMeta").textContent=`你是 ${NAME[d.power]} · 已结算 ${d.settled} 个阶段`
+      + ` · 当前 ${d.current_phase}`+(d.result_text?` · ${d.result_text}`:"");
+  }catch(e){ toast(e.message,"err"); }
+}
+
+$("#replayPick").onchange=e=>showReplayPhase(e.target.value);
+$("#btnReplay").onclick=()=>loadReplay();
 
 // ---------- 模型页签 ----------
 let llmSeats={};
