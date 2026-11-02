@@ -39,20 +39,23 @@ jobs:
             APP_VERSION=ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: 容器冒烟
+      - name: 容器冒烟（无密钥：管理面必须锁死）
         run: |
           docker run -d --name dw -p 8080:8080 diplomacy-web:ci
           for i in $(seq 1 40); do
             if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          echo "--- healthz（版本应为 ci）---"
+          echo "--- healthz（版本应为 ci，且自报已锁定）---"
           curl -fsS http://127.0.0.1:8080/healthz \
-            | python -c "import json,sys; d=json.load(sys.stdin); assert d['version']=='ci', d; print('version ok:', d)"
+            | python -c "import json,sys; d=json.load(sys.stdin); assert d['version']=='ci', d; assert d['exposed'] is True, d; assert d['admin_locked'] is True, d; print('locked ok:', d)"
           echo
-          echo "--- 建局 ---"
-          curl -fsS -X POST http://127.0.0.1:8080/api/match \
-            | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['tokens'])==7, d; print('7 seats ok, phase', d['phase'])"
+          # v0.7.5 起「无密钥 + 对外监听」= 管理面整体 403。这一步以前写的是「应拿到 7 个令牌」，
+          # fail-closed 上线后它就一直是红的，而后面十几个冒烟步骤全被跳过——CI 静悄悄地死了四版。
+          # 所以现在这里改成断言**新的**契约，带密钥的那条路单独一步（见下）。
+          echo "--- 无密钥建局必须 403 ---"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/api/match)
+          test "$code" = "403" && echo "403 ok"
       - name: 失败时打印容器日志
         if: failure()
         run: docker logs dw || true
@@ -60,20 +63,39 @@ jobs:
         if: always()
         run: docker rm -f dw || true
 
+      # 带密钥的那条路：镜像里真能建局、真发得出七个座位令牌
+      - name: 容器冒烟（带密钥：能建局）
+        run: |
+          docker run -d --name dw-key -p 8085:8080 -e ADMIN_KEY=smoke diplomacy-web:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8085/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          echo "--- 建局 ---"
+          curl -fsS -X POST http://127.0.0.1:8085/api/match -H 'X-Admin-Key: smoke' \
+            | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['tokens'])==7, d; print('7 seats ok, phase', d['phase'])"
+      - name: 失败时打印容器日志（带密钥）
+        if: failure()
+        run: docker logs dw-key || true
+      - name: 清理（带密钥）
+        if: always()
+        run: docker rm -f dw-key || true
+
       # 回归测试：绑定挂载一个属主不是 10001 的目录（Linux 上最典型的部署方式），
       # 早期版本会因 /data 不可写而在建局时 500。CI 的裸跑冒烟测不出来。
       - name: 绑定挂载冒烟（权限回归）
+        if: always()
         run: |
           mkdir -p /tmp/dwdata
           ls -ld /tmp/dwdata
           docker run -d --name dw-bind -p 8081:8080 \
-            -v /tmp/dwdata:/data -e DATA_DIR=/data diplomacy-web:ci
+            -v /tmp/dwdata:/data -e DATA_DIR=/data -e ADMIN_KEY=smoke diplomacy-web:ci
           for i in $(seq 1 40); do
             if curl -fsS http://127.0.0.1:8081/healthz >/dev/null 2>&1; then break; fi
             sleep 1
           done
           echo "--- 建局（绑定挂载）---"
-          curl -fsS -X POST http://127.0.0.1:8081/api/match \
+          curl -fsS -X POST http://127.0.0.1:8081/api/match -H 'X-Admin-Key: smoke' \
             | python -c "import json,sys; d=json.load(sys.stdin); assert len(d['tokens'])==7, d; print('bind mount ok, phase', d['phase'])"
           echo "--- 落盘检查 ---"
           test -f /tmp/dwdata/state.json && echo "state.json written by uid $(stat -c %u /tmp/dwdata/state.json)"
@@ -88,6 +110,7 @@ jobs:
 
       # 管理面：设了 ADMIN_KEY 后，无密钥的建局必须被拒（否则等于公开全部私信）
       - name: 管理密钥冒烟
+        if: always()
         run: |
           docker run -d --name dw-adm -p 8082:8080 -e ADMIN_KEY=smoke diplomacy-web:ci
           for i in $(seq 1 40); do
@@ -115,8 +138,9 @@ jobs:
           # 这一步只在容器里才有意义：本地跑通了不代表镜像里有那份 SVG
           curl -fsS http://127.0.0.1:8082/api/map > /tmp/map.json
           python -c "import json; d=json.load(open('/tmp/map.json',encoding='utf-8')); assert len(d['areas'])==76, len(d['areas']); assert d['missing']==[], d['missing']; assert len(d['viewBox'])==4, d['viewBox']; print('map ok', len(d['areas']), 'areas')"
-          echo "--- 地图数据面：22 支部队、34 个中心，命令只给自己的座位 ---"
+          echo "--- 地图数据面：22 支部队、22 个已被占领的中心，命令只给自己的座位 ---"
           # 令牌换座位就看，法国只应拿到 BRE/MAR/PAR 三处可下令地点
+          # （34 个补给中心里开局被占领的是 22 个，其余 12 个中立）
           T=$(python -c "import json;print(json.load(open('/tmp/match.json'))['tokens']['FRANCE'])")
           curl -fsS http://127.0.0.1:8082/api/board -H "X-Seat-Token: $T" > /tmp/board.json
           python -c "import json; d=json.load(open('/tmp/board.json',encoding='utf-8')); assert len(d['units'])==22, len(d['units']); assert len(d['centers'])==22, len(d['centers']); assert set(d['mine'])=={'BRE','MAR','PAR'}, d['mine']; assert d['editable'] is True; print('board ok')"
@@ -128,15 +152,18 @@ jobs:
         run: docker rm -f dw-adm || true
 
       - name: 模型座位冒烟（脚本模型，不花钱）
+        if: always()
         run: |
-          docker run -d --name dw-llm -p 8083:8080 -e LLM_PROVIDER=scripted diplomacy-web:ci
+          K='X-Admin-Key: smoke'
+          docker run -d --name dw-llm -p 8083:8080 \
+            -e LLM_PROVIDER=scripted -e ADMIN_KEY=smoke diplomacy-web:ci
           for i in $(seq 1 40); do
             if curl -fsS http://127.0.0.1:8083/healthz >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          curl -fsS -X POST http://127.0.0.1:8083/api/match > /dev/null
+          curl -fsS -X POST http://127.0.0.1:8083/api/match -H "$K" > /dev/null
           echo "--- 把意大利交给模型 ---"
-          curl -fsS -X POST http://127.0.0.1:8083/api/llm/seat \
+          curl -fsS -X POST http://127.0.0.1:8083/api/llm/seat -H "$K" \
             -H 'Content-Type: application/json' -d '{"power":"ITALY","enabled":true}' \
             | python -c "import json,sys; d=json.load(sys.stdin); assert d['enabled'] is True, d; print('seat on ok')"
           # 关键在「不手动驱动」：以前这里调 /api/llm/tick，绕开了后台线程，
@@ -155,7 +182,7 @@ jobs:
           curl -fsS http://127.0.0.1:8083/api/llm \
             | python -c "import json,sys; u=json.load(sys.stdin)['seats']['ITALY']['usage']; assert u['calls']>=1, u; assert u['fallbacks']==0, u; print('usage ok', u)"
           echo "--- 上下文窗口有内容 ---"
-          curl -fsS 'http://127.0.0.1:8083/api/llm/context?power=ITALY' \
+          curl -fsS -H "$K" 'http://127.0.0.1:8083/api/llm/context?power=ITALY' \
             | python -c "import json,sys; d=json.load(sys.stdin); assert d['text'] and d['stats']['chars']>0, d; print('context ok', d['stats'])"
       - name: 失败时打印模型座位日志
         if: failure()
@@ -167,29 +194,31 @@ jobs:
       # 网页改配置：只有容器里才验得全——静态页要能拿到新表单、配置要落在 /data 卷上、
       # 存完之后不重启就能把座位交出去。单测跑的是 TestClient，证不了这些。
       - name: 模型配置冒烟（网页改配置，不重启）
+        if: always()
         env:
           # 写进配置、再拿去反查响应里有没有明文。同一变量出两次，断言才不会退化成
           # 「随便一个不存在的串自然不在响应里」。
           CFG_SECRET: 'sk-should-not-leak-1234'
         run: |
-          docker run -d --name dw-cfg -p 8084:8080 diplomacy-web:ci
+          K='X-Admin-Key: smoke'
+          docker run -d --name dw-cfg -p 8084:8080 -e ADMIN_KEY=smoke diplomacy-web:ci
           for i in $(seq 1 40); do
             if curl -fsS http://127.0.0.1:8084/healthz >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          curl -fsS -X POST http://127.0.0.1:8084/api/match > /dev/null
+          curl -fsS -X POST http://127.0.0.1:8084/api/match -H "$K" > /dev/null
           echo "--- 默认什么都没有，来源必须是 none 而不是 env ---"
-          curl -fsS http://127.0.0.1:8084/api/llm/settings \
+          curl -fsS -H "$K" http://127.0.0.1:8084/api/llm/settings \
             | python -c "import json,sys; s=json.load(sys.stdin)['settings']; assert s['source']=='none', s; assert s['configured'] is False, s; print('unconfigured ok')"
           echo "--- 存一份配置（离线脚本 + 密钥），来源变 file ---"
-          curl -fsS -X PUT http://127.0.0.1:8084/api/llm/settings -H 'Content-Type: application/json' \
+          curl -fsS -X PUT -H "$K" http://127.0.0.1:8084/api/llm/settings -H 'Content-Type: application/json' \
             -d "{\"mode\":\"scripted\",\"budget_cny\":3,\"api_key\":\"$CFG_SECRET\"}" \
             | python -c "import json,os,sys; s=json.load(sys.stdin)['settings']; k=os.environ['CFG_SECRET']; assert s['source']=='file', s; assert s['configured'] is True, s; assert s['budget_cny']==3, s; assert s['has_key'] is True, s; assert s['key_hint'].endswith(k[-4:]) and k not in s['key_hint'], s; print('save ok', s['key_hint'])"
           echo "--- 密钥不能回显（连尾四位之外的任何片段都不行）---"
-          curl -fsS http://127.0.0.1:8084/api/llm/settings > /tmp/cfg.json
+          curl -fsS -H "$K" http://127.0.0.1:8084/api/llm/settings > /tmp/cfg.json
           python -c "import json,os,pathlib; k=os.environ['CFG_SECRET']; t=pathlib.Path('/tmp/cfg.json').read_text(); assert k not in t, 'key leaked: '+t; s=json.loads(t)['settings']; assert 'api_key' not in s, s; print('no leak ok')"
           echo "--- 存完就能把座位交给模型，不需要重启 ---"
-          curl -fsS -X POST http://127.0.0.1:8084/api/llm/seat -H 'Content-Type: application/json' \
+          curl -fsS -X POST -H "$K" http://127.0.0.1:8084/api/llm/seat -H 'Content-Type: application/json' \
             -d '{"power":"ITALY"}' \
             | python -c "import json,sys; d=json.load(sys.stdin); assert d['enabled'] is True, d; assert d['seat']['provider']=='scripted', d; print('seat ok')"
           echo "--- 配置真的落在 /data 卷里（换容器也还在）---"
@@ -205,13 +234,15 @@ jobs:
       # 阶段时钟：没人交令时它必须自己把局面推下去。
       # 这是「一个人挂机不会冻住全桌」唯一的端到端证明——单测只能证明函数逻辑，证不了线程真的在跑。
       - name: 阶段时钟冒烟
+        if: always()
         run: |
-          docker run -d --name dw-clock -p 8084:8080 -e PHASE_SECONDS=2 diplomacy-web:ci
+          docker run -d --name dw-clock -p 8084:8080 \
+            -e PHASE_SECONDS=2 -e ADMIN_KEY=smoke diplomacy-web:ci
           for i in $(seq 1 40); do
             if curl -fsS http://127.0.0.1:8084/healthz >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          curl -fsS -X POST http://127.0.0.1:8084/api/match > /dev/null
+          curl -fsS -X POST http://127.0.0.1:8084/api/match -H 'X-Admin-Key: smoke' > /dev/null
           echo "--- 开局应当有倒计时 ---"
           curl -fsS http://127.0.0.1:8084/api/state \
             | python -c "import json,sys; d=json.load(sys.stdin); assert d['phase']=='S1901M' and d['deadline_left'] is not None, d; print('deadline ok')"
